@@ -1,7 +1,6 @@
 version: "2"
 
 linters:
-  default: standard
   enable:
     - gocritic       # catches subtle Go pitfalls and style issues
     - godot          # enforces punctuation on GoDoc comments
@@ -10,35 +9,49 @@ linters:
     - prealloc       # flags slice append loops that could be pre-allocated
     - unconvert      # removes unnecessary type conversions
     - wastedassign   # catches assignments whose result is never used
-  settings:
-    revive:
-      rules:
-        - name: exported
-          severity: error
-          arguments:
-            - "checkPrivateReceivers"
-            - "sayRepetitiveInsteadOfStutters"
-    gocritic:
-      enabled-tags:
-        - diagnostic
-        - performance
-      disabled-checks:
-        - appendAssign   # intentional in ring buffer slot recycling
-    godot:
-      scope: declarations
-      capital: true
-    misspell:
-      locale: US
+    - depguard       # absolutely enforces zero third-party dependencies
 
-  exclusions:
+linters-settings:
+  depguard:
     rules:
-      # unsafe is explicitly mandated by the project for bare-metal serialization
-      # and vectorized operations; suppress the blanket unsafe warning.
-      - linters: [gosec]
-        text: "use of unsafe"
+      main:
+        files:
+          - $all
+        allow:
+          - $gostd   # strictly allow only the Go Standard Library
+  revive:
+    rules:
+      - name: exported
+        severity: error
+        arguments:
+          - "checkPrivateReceivers"
+          - "sayRepetitiveInsteadOfStutters"
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - performance
+    disabled-checks:
+      - appendAssign   # intentional in ring buffer slot recycling
+  godot:
+    scope: declarations
+    capital: true
+  misspell:
+    locale: US
+  govet:
+    enable:
+      - fieldalignment # enforces optimal memory packing for bare-metal structs
 
-      # Padding fields ("_ [64]byte") are intentional false-sharing guards —
-      # not dead code.
-      - linters: [revive]
-        text: "unused-parameter"
-        path: "ringbuf\\.go"
+issues:
+  exclude-rules:
+    # unsafe is explicitly mandated by the project for bare-metal serialization
+    # and vectorized operations; suppress the blanket unsafe warning.
+    - linters:
+        - gosec
+      text: "use of unsafe"
+
+    # Padding fields ("_ [64]byte") are intentional false-sharing guards —
+    # not dead code.
+    - linters:
+        - revive
+      text: "unused-parameter"
+      path: "ringbuf\\.go"

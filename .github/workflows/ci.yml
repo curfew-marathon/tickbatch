@@ -23,67 +23,69 @@ jobs:
       GOARCH: ${{ matrix.goarch }}
     steps:
       - uses: actions/checkout@v7
-
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.25'
-
       - name: Run tests with race detector
         run: go test -v -race ./...
 
-  benchmark:
-    name: Zero-Allocation Enforcer
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-
-      - name: Run benchmarks
-        run: go test -bench=. -benchmem ./... | tee bench.out
-
-      - name: Enforce zero-allocation contract
-        shell: bash
-        run: |
-          echo "=== Benchmark Results ==="
-          cat bench.out
-          echo ""
-          echo "=== Checking allocs/op ==="
-          awk '
-            /allocs\/op/ {
-              for (i = 1; i <= NF; i++) {
-                if ($i == "allocs/op" && $(i-1) + 0 > 0) {
-                  print "VIOLATION: " $0
-                  found = 1
-                }
-              }
-            }
-            END {
-              if (found) {
-                print "\nFAIL: Zero-allocation contract violated on the hot path."
-                exit 1
-              } else {
-                print "OK: All benchmarks satisfy the zero-allocation contract."
-              }
-            }
-          ' bench.out
-
   lint:
-    name: Lint
+    name: Lint & Security
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.25'
-
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
           version: latest
+      - name: govulncheck
+        uses: golang/govulncheck-action@v1
+        with:
+          go-version-input: '1.25'
+
+  benchmark:
+    name: Performance Enforcer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # needed to fetch main for PR comparisons
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Install benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@latest
+
+      - name: Run PR Benchmarks
+        run: go test -bench=. -benchmem -count=5 ./... | tee pr.out
+
+      - name: Enforce zero-allocation contract
+        shell: bash
+        run: |
+          awk '
+            /allocs\/op/ {
+              for (i = 1; i <= NF; i++) {
+                if ($i == "allocs/op" && $(i-1) + 0 > 0) {
+                  print "VIOLATION: " $0; found = 1
+                }
+              }
+            }
+            END { if (found) exit 1 }
+          ' pr.out
+
+      - name: Run Main Benchmarks & Compare (PR Only)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          git checkout ${{ github.base_ref }}
+          go test -bench=. -benchmem -count=5 ./... | tee main.out
+          echo "=== Performance Delta (Main vs PR) ==="
+          benchstat main.out pr.out
