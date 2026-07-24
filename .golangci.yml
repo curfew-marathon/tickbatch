@@ -30,7 +30,6 @@ linters:
     misspell:
       locale: US
 
-issues:
   exclusions:
     rules:
       # unsafe is explicitly mandated by the project for bare-metal serialization
