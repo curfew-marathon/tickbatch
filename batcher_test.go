@@ -151,6 +151,120 @@ func TestRunLoop(t *testing.T) {
 	t.Logf("Sink.Flush called %d times over 1s at %d Hz tick rate", got, tickRate)
 }
 
+// Tick represents a single HFT market tick with symbol, price, and size.
+// It is a flat, pointer-free struct guaranteeing O(1) GC scan time per the
+// [Serializable] contract.
+type Tick struct {
+	// Symbol is the instrument identifier, padded with zero bytes.
+	Symbol [8]byte
+	// Price is the last-trade price.
+	Price float64
+	// Size is the last-trade quantity in lots.
+	Size uint32
+}
+
+// Marshal implements [Serializable] by writing each field directly into buf via
+// unsafe pointer casts, bypassing encoding/binary for zero-overhead serialization.
+// The written region is unsafe.Sizeof(Tick{}) bytes; the caller must supply a
+// buffer of at least that length.
+func (t Tick) Marshal(buf []byte) int {
+	const size = int(unsafe.Sizeof(Tick{}))
+	if len(buf) < size {
+		return 0
+	}
+	copy(buf[:8], t.Symbol[:])
+	*(*float64)(unsafe.Pointer(&buf[8])) = t.Price
+	*(*uint32)(unsafe.Pointer(&buf[16])) = t.Size
+	return size
+}
+
+// captureSink is a test-only Sink that records the first flushed payload on a
+// buffered channel so tests can block until a batch arrives.
+type captureSink struct {
+	ch chan []byte
+}
+
+// Flush copies payload into a fresh slice and delivers it to the channel
+// non-blocking, preserving only the first batch if Flush is called multiple times.
+func (c *captureSink) Flush(payload []byte) error {
+	buf := make([]byte, len(payload))
+	copy(buf, payload)
+	select {
+	case c.ch <- buf:
+	default:
+	}
+	return nil
+}
+
+// TestTickSerialization pushes three Tick structs, waits for the first flush,
+// and asserts the exact payload layout: byte length, header sequence ID, header
+// item count, and full field-level data integrity of the first decoded Tick.
+func TestTickSerialization(t *testing.T) {
+	const tickSize = int(unsafe.Sizeof(Tick{}))
+
+	sink := &captureSink{ch: make(chan []byte, 1)}
+	b := New[Tick](Config{
+		QueueSize:    16,
+		MaxBatchSize: headerSize + 16*tickSize,
+		TickRate:     200,
+		Sink:         sink,
+	})
+
+	ticks := [3]Tick{
+		{Symbol: [8]byte{'A', 'A', 'P', 'L'}, Price: 189.98, Size: 100},
+		{Symbol: [8]byte{'G', 'O', 'O', 'G'}, Price: 175.50, Size: 50},
+		{Symbol: [8]byte{'M', 'S', 'F', 'T'}, Price: 415.25, Size: 200},
+	}
+
+	// Push all items before starting so they land in the very first drain cycle.
+	for _, tick := range ticks {
+		b.Push(tick)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := b.Start(ctx)
+
+	var payload []byte
+	select {
+	case payload = <-sink.ch:
+	case <-time.After(500 * time.Millisecond):
+		cancel()
+		<-done
+		t.Fatal("timed out waiting for Sink.Flush")
+	}
+
+	cancel()
+	<-done
+
+	wantLen := headerSize + 3*tickSize
+	if len(payload) != wantLen {
+		t.Fatalf("payload length: got %d, want %d", len(payload), wantLen)
+	}
+
+	// Decode sequence ID: bytes [0:4], little-endian uint32.
+	seq := uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24
+	if seq != 1 {
+		t.Errorf("sequence ID: got %d, want 1", seq)
+	}
+
+	// Decode item count: bytes [4:6], little-endian uint16.
+	count := uint16(payload[4]) | uint16(payload[5])<<8
+	if count != 3 {
+		t.Errorf("item count: got %d, want 3", count)
+	}
+
+	// Decode and verify the first Tick from the item region.
+	data := payload[headerSize:]
+	var got Tick
+	copy(got.Symbol[:], data[:8])
+	got.Price = *(*float64)(unsafe.Pointer(&data[8]))
+	got.Size = *(*uint32)(unsafe.Pointer(&data[16]))
+
+	if got != ticks[0] {
+		t.Errorf("first Tick: got %+v, want %+v", got, ticks[0])
+	}
+}
+
 // BenchmarkPush is the Phase 1 performance gate.
 // Success criterion: 0 B/op and 0 allocs/op.
 func BenchmarkPush(b *testing.B) {

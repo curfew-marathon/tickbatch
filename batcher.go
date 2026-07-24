@@ -2,8 +2,14 @@ package tickbatch
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 )
+
+// headerSize is the byte length of the fixed header prepended to every flushed batch.
+// Layout: bytes [0:4] sequence ID (uint32, little-endian), [4:6] item count (uint16,
+// little-endian), [6:8] reserved and zeroed.
+const headerSize = 8
 
 // Config holds construction parameters for a [Batcher].
 type Config struct {
@@ -35,7 +41,7 @@ type Config struct {
 type Batcher[T Serializable] struct {
 	ring       *ringbuf[T]
 	cfg        Config
-	drainSlice []T
+	sequenceID atomic.Uint32
 	byteBuffer []byte
 }
 
@@ -45,7 +51,6 @@ func New[T Serializable](cfg Config) *Batcher[T] {
 	return &Batcher[T]{
 		ring:       newRingbuf[T](cfg.QueueSize),
 		cfg:        cfg,
-		drainSlice: make([]T, cfg.QueueSize),
 		byteBuffer: make([]byte, cfg.MaxBatchSize),
 	}
 }
@@ -89,23 +94,34 @@ func (b *Batcher[T]) runLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			offset := headerSize
 			n := 0
-			for n < len(b.drainSlice) {
-				if !b.ring.pop(&b.drainSlice[n]) {
+			for {
+				written, ok := b.ring.popMarshal(b.byteBuffer[offset:])
+				if !ok {
 					break
 				}
+				if written == 0 {
+					break
+				}
+				offset += written
 				n++
 			}
-			if n == 0 {
+			if n == 0 || b.cfg.Sink == nil {
 				continue
 			}
-			offset := 0
-			for i := 0; i < n; i++ {
-				offset += b.drainSlice[i].Marshal(b.byteBuffer[offset:])
-			}
-			if b.cfg.Sink == nil || offset == 0 {
-				continue
-			}
+
+			seq := b.sequenceID.Add(1)
+			b.byteBuffer[0] = byte(seq)
+			b.byteBuffer[1] = byte(seq >> 8)
+			b.byteBuffer[2] = byte(seq >> 16)
+			b.byteBuffer[3] = byte(seq >> 24)
+			count := uint16(n)
+			b.byteBuffer[4] = byte(count)
+			b.byteBuffer[5] = byte(count >> 8)
+			b.byteBuffer[6] = 0
+			b.byteBuffer[7] = 0
+
 			if err := b.cfg.Sink.Flush(b.byteBuffer[:offset]); err != nil && b.cfg.OnFlushError != nil {
 				b.cfg.OnFlushError(err)
 			}

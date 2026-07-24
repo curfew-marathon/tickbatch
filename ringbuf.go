@@ -76,6 +76,30 @@ func (r *ringbuf[T]) push(item T) bool {
 	}
 }
 
+// popMarshal atomically dequeues the next item and marshals it directly into
+// buf, returning the bytes written and whether an item was available.
+// Marshal is called while the slot is claimed and before recycling, so no
+// producer can observe the slot during this window.
+func (r *ringbuf[T]) popMarshal(buf []byte) (int, bool) {
+	for {
+		pos := r.head.Load()
+		s := &r.data[pos&r.mask]
+		seq := s.seq.Load()
+		diff := int64(seq) - int64(pos+1)
+
+		switch {
+		case diff == 0:
+			if r.head.CompareAndSwap(pos, pos+1) {
+				n := s.item.Marshal(buf)
+				s.seq.Store(pos + r.mask + 1)
+				return n, true
+			}
+		case diff < 0:
+			return 0, false
+		}
+	}
+}
+
 // pop attempts to dequeue into item. Returns false if the buffer is empty.
 func (r *ringbuf[T]) pop(item *T) bool {
 	for {
