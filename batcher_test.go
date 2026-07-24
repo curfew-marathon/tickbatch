@@ -1,7 +1,10 @@
 package tickbatch
 
 import (
+	"context"
+	"sync/atomic"
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -24,6 +27,38 @@ func (u UecarrixTelemetry) Marshal(buf []byte) int {
 	}
 	copy(buf[:size], (*[size]byte)(unsafe.Pointer(&u))[:])
 	return size
+}
+
+// NinjaDriftState is a flat, pointer-free struct simulating high-frequency
+// car telemetry data for use in tick-engine tests.
+type NinjaDriftState struct {
+	Throttle   float32
+	Brake      float32
+	SteerAngle float32
+	Velocity   float32
+}
+
+// Marshal implements [Serializable] by encoding the struct into buf via a direct
+// memory copy, returning the number of bytes written.
+func (n NinjaDriftState) Marshal(buf []byte) int {
+	const size = int(unsafe.Sizeof(NinjaDriftState{}))
+	if len(buf) < size {
+		return 0
+	}
+	copy(buf[:size], (*[size]byte)(unsafe.Pointer(&n))[:])
+	return size
+}
+
+// countingSink is a test-only Sink that atomically records how many times
+// Flush has been called.
+type countingSink struct {
+	count atomic.Int64
+}
+
+// Flush increments the call counter and returns nil.
+func (c *countingSink) Flush(_ []byte) error {
+	c.count.Add(1)
+	return nil
 }
 
 // TestPushPop verifies the fundamental FIFO contract: a value pushed must be
@@ -79,6 +114,41 @@ func TestPushOnFullQueueDrops(t *testing.T) {
 	if b.ring.pop(&extra) {
 		t.Error("queue must be empty after draining exactly size items")
 	}
+}
+
+// TestRunLoop verifies that the tick engine wakes, drains the queue, and
+// delivers batches to the Sink without panicking or leaking goroutines.
+func TestRunLoop(t *testing.T) {
+	const (
+		tickRate  = 60
+		pushCount = 200
+	)
+
+	sink := &countingSink{}
+	b := New[NinjaDriftState](Config{
+		QueueSize:    1 << 10,
+		MaxBatchSize: 4096,
+		TickRate:     tickRate,
+		Sink:         sink,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	done := b.Start(ctx)
+
+	state := NinjaDriftState{Throttle: 1.0, Brake: 0.0, SteerAngle: 0.3, Velocity: 88.5}
+	for i := 0; i < pushCount; i++ {
+		b.Push(state)
+	}
+
+	<-done
+
+	got := sink.count.Load()
+	if got == 0 {
+		t.Fatal("expected at least one Sink.Flush call, got zero")
+	}
+	t.Logf("Sink.Flush called %d times over 1s at %d Hz tick rate", got, tickRate)
 }
 
 // BenchmarkPush is the Phase 1 performance gate.

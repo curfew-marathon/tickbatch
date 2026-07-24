@@ -47,3 +47,20 @@ To push Go's performance to the absolute limit, this project aggressively avoids
 - [ ] Implement `UDPSink` using the standard `net` package (fire-and-forget).
 - [ ] Define a `Compressor` interface so users can optionally wrap their sinks in a library like `klauspost/compress/zstd`.
 - [ ] **Testable Deliverable:** Two local UDP scripts (a sender using `tickbatch` and a vanilla Go UDP listener) successfully syncing a stream of structs in real-time.
+
+## Phase 7: Fuzzing, Chaos & Reliability
+**Goal:** Defend the zero-allocation hot path and memory safety against malicious payloads, awkward memory boundaries, and downstream network failures.
+- [ ] **The Fuzzer (`unsafe` Guard):** Implement Go native fuzzing (`go test -fuzz`) targeting the Phase 3 byte-packing and Phase 5 Vectorized XOR engines. 
+- [ ] **Alignment & Boundary Verification:** Ensure the fuzzer injects randomized, non-standard byte slice lengths (e.g., 37 bytes) to mathematically prove the tail-byte fallback logic cannot segfault or panic under chaotic conditions.
+- [ ] **The Chaos Sink (Stall Protection):** Implement a `BlockingMockSink` that intentionally sleeps or hangs during the `Flush()` call. 
+- [ ] **Non-Blocking Verification:** Write a test proving that a stalled network sink processing NINJA DRIFT telemetry will not lock up the `runLoop`, ensuring the batcher continues to drain the queue and apply backpressure policies without freezing the main thread.
+- [ ] **Graceful Shutdown:** Implement a context-cancellation test (`ctx.Done()`) that proves the `runLoop` stops accepting new pushes, flushes the final remaining items in the queue to the sink, and exits cleanly without leaking goroutines or dropping the final batch.
+- [ ] **Testable Deliverable:** The library must survive a 5-minute fuzzing gauntlet and a simulated network outage chaos test while maintaining 0 allocations and 0 memory leaks.
+
+## Phase 8: SRE Observability & Ultra-Low Latency (HFT Grade)
+**Goal:** Expose zero-allocation metrics for production alerting and provide busy-spin tick modes to eliminate OS scheduler jitter for microsecond precision.
+- [ ] **Lock-Free Telemetry:** Define a `Metrics` struct utilizing `atomic.Uint64` for counters (`ItemsPushed`, `ItemsDropped`, `BatchesFlushed`, `CASRetries`). 
+- [ ] **Zero-Overhead Instrumentation:** Instrument the `Push()` and `runLoop()` methods to increment these atomic counters without introducing any heap allocations, locks, or branching overhead in the hot path.
+- [ ] **The Busy-Spin Engine:** Add a `SpinTick` boolean to the `Config`. Implement a `runSpinLoop()` alternative to the standard `time.Ticker` that utilizes a busy-wait `for` loop querying `time.Now().UnixNano()`. This trades CPU utilization for absolute, sub-millisecond precision by bypassing the Go scheduler.
+- [ ] **Hardware Affinity Documentation:** Document the explicit usage of `runtime.LockOSThread()` for consumers who need to pin the `runLoop` to a specific, isolated CPU core to keep L1/L2 caches perfectly hot and prevent NUMA node hopping.
+- [ ] **Testable Deliverable:** A benchmark test directly comparing the P99 tail latency of the standard `time.Ticker` versus the `SpinTick` busy-loop under heavy concurrent load. A secondary test asserting the atomic metrics accurately reflect dropped items during a queue-full scenario.
