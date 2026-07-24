@@ -51,3 +51,23 @@ A feature or PR is only complete if:
 3. `golangci-lint config verify && golangci-lint run` reports no issues.
 4. No CGO dependencies were introduced.
 5. The behavior under backpressure/queue-full states is explicitly tested and verified.
+
+## Git Commit Standard (Conventional Commits)
+You must strictly adhere to the [Conventional Commits](https://www.conventionalcommits.org/) specification for all generated commit messages. This repository relies on structured commit history for automated changelogs and release versioning.
+
+**Format:**
+`<type>[optional scope]: <description>`
+
+**Allowed Types:**
+* `feat`: A new feature or major phase completion (e.g., `feat(engine): implement vectorized delta encoding`).
+* `perf`: A code change specifically targeting throughput or memory optimization (e.g., `perf(ringbuf): remove drainSlice to eliminate L1 cache double-copy`).
+* `fix`: A bug fix or pipeline repair (e.g., `fix(ci): correct golangci-lint schema validation`).
+* `refactor`: A code change that neither fixes a bug nor adds a feature, but improves structure.
+* `test`: Adding missing tests or correcting existing tests (e.g., `test(fuzz): add boundary fuzzer for tail-byte fallback`).
+* `docs`: Documentation only changes (e.g., `docs(readme): pivot use cases to HFT and L2 market data`).
+* `chore`: Build process or auxiliary tool changes.
+
+**Strict Rules:**
+1. The description must be written in the imperative, present tense (e.g., "add" not "added" or "adds").
+2. Do not capitalize the first letter of the description.
+3. Do not place a period at the end of the description.
