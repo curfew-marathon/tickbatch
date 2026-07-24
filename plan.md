@@ -6,13 +6,13 @@ To push Go's performance to the absolute limit, this project aggressively avoids
 
 ## Phase 1: The Zero-Alloc Ingest & Contract Definition
 **Goal:** Define the generic constraints and build a fixed-size, lock-free queue that defeats False Sharing.
-- [ ] Define the `Serializable` interface (`Marshal(buf []byte) int`). Document strictly that implementors must use **pointer-free** flat structs to guarantee O(1) GC scan times.
-- [ ] Define `Config` and the core `Batcher[T Serializable]` struct. 
-- [ ] Implement `ringbuf[T Serializable]` using atomic pointers. 
-- [ ] **Hardware Optimization:** Inject Cache-Line Padding (`[64]byte`) between the read and write pointers in the `ringbuf` struct to physically separate them in the CPU cache, completely eliminating False Sharing.
-- [ ] Implement `Batcher.Push(item T)`.
-- [ ] **Testable Deliverable:** A unit test proving data can be pushed and popped sequentially.
-- [ ] **Performance Gate:** `go test -bench=. -benchmem` must guarantee `0 allocs/op` on `Push()`.
+- [x] Define the `Serializable` interface (`Marshal(buf []byte) int`). Document strictly that implementors must use **pointer-free** flat structs to guarantee O(1) GC scan times.
+- [x] Define `Config` and the core `Batcher[T Serializable]` struct. 
+- [x] Implement `ringbuf[T Serializable]` using atomic pointers. 
+- [x] **Hardware Optimization:** Inject Cache-Line Padding (`[64]byte`) between the read and write pointers in the `ringbuf` struct to physically separate them in the CPU cache, completely eliminating False Sharing.
+- [x] Implement `Batcher.Push(item T)`.
+- [x] **Testable Deliverable:** A unit test proving data can be pushed and popped sequentially.
+- [x] **Performance Gate:** `go test -bench=. -benchmem` must guarantee `0 allocs/op` on `Push()`.
 
 ## Phase 2: The Tick Engine & Zero-Alloc Drain
 **Goal:** Extract data at a specific Hz rate without allocating new memory per tick.

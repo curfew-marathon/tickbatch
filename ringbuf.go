@@ -18,7 +18,6 @@ type slot[T Serializable] struct {
 // cache line holding head on all other cores — a phenomenon called False Sharing
 // that can collapse throughput by an order of magnitude.
 type ringbuf[T Serializable] struct {
-	_    [8]byte // align head to its own cache line start
 	head atomic.Uint64
 	_    [64]byte // padding: isolates head from tail in the CPU cache
 
@@ -29,8 +28,12 @@ type ringbuf[T Serializable] struct {
 	data []slot[T]
 }
 
-// newRingbuf allocates a ring buffer. size must be a power of two.
+// newRingbuf allocates a ring buffer. size must be a positive power of two;
+// it panics otherwise.
 func newRingbuf[T Serializable](size uint64) *ringbuf[T] {
+	if size == 0 || size&(size-1) != 0 {
+		panic("tickbatch: QueueSize must be a positive power of two")
+	}
 	r := &ringbuf[T]{
 		mask: size - 1,
 		data: make([]slot[T], size),

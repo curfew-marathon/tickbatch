@@ -14,14 +14,15 @@ type UecarrixTelemetry struct {
 	Steering float32
 }
 
-// Marshal implements [Serializable]. It packs the struct directly into buf via
-// an unsafe pointer cast — a single word-sized write with no branching.
+// Marshal implements [Serializable]. It reads bytes from the struct (which is
+// stack-allocated and properly aligned) and copies them into buf, making it
+// safe on architectures with strict alignment requirements.
 func (u UecarrixTelemetry) Marshal(buf []byte) int {
 	const size = int(unsafe.Sizeof(UecarrixTelemetry{}))
 	if len(buf) < size {
 		return 0
 	}
-	*(*UecarrixTelemetry)(unsafe.Pointer(&buf[0])) = u
+	copy(buf[:size], (*[size]byte)(unsafe.Pointer(&u))[:])
 	return size
 }
 

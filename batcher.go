@@ -16,7 +16,7 @@ type Batcher[T Serializable] struct {
 }
 
 // New allocates and returns a ready-to-use Batcher.
-// cfg.QueueSize must be a power of two; behaviour is undefined otherwise.
+// It panics if cfg.QueueSize is zero or not a power of two.
 func New[T Serializable](cfg Config) *Batcher[T] {
 	return &Batcher[T]{
 		ring: newRingbuf[T](cfg.QueueSize),
