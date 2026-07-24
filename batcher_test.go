@@ -265,6 +265,90 @@ func TestTickSerialization(t *testing.T) {
 	}
 }
 
+// TestNewPanicsOnZeroQueueSize verifies that New panics when QueueSize is zero,
+// preserving the ring buffer's power-of-two size invariant.
+func TestNewPanicsOnZeroQueueSize(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("New with QueueSize=0 did not panic")
+		}
+	}()
+	New[UecarrixTelemetry](Config{QueueSize: 0})
+}
+
+// TestNewPanicsOnNonPowerOfTwoQueueSize verifies that New panics when QueueSize
+// is not a power of two, as the Vyukov bitmask algorithm requires power-of-two capacity.
+func TestNewPanicsOnNonPowerOfTwoQueueSize(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("New with non-power-of-two QueueSize did not panic")
+		}
+	}()
+	New[UecarrixTelemetry](Config{QueueSize: 3})
+}
+
+// TestStartPanicsOnNonPositiveTickRate verifies that Start panics when
+// Config.TickRate is zero or negative, catching invalid configurations early.
+func TestStartPanicsOnNonPositiveTickRate(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("Start with TickRate=0 did not panic")
+		}
+	}()
+	b := New[UecarrixTelemetry](Config{QueueSize: 16})
+	b.Start(context.Background())
+}
+
+// TestRunLoopBufferFull verifies graceful degradation when byteBuffer cannot
+// fit all queued items: the drain loop must stop at capacity, drop the
+// overflow item silently, and still deliver the partial batch to the Sink.
+func TestRunLoopBufferFull(t *testing.T) {
+	const tickSize = int(unsafe.Sizeof(Tick{}))
+
+	sink := &captureSink{ch: make(chan []byte, 1)}
+	b := New[Tick](Config{
+		QueueSize:    16,
+		MaxBatchSize: headerSize + tickSize, // fits exactly one Tick; second is dropped
+		TickRate:     200,
+		Sink:         sink,
+	})
+
+	b.Push(Tick{Symbol: [8]byte{'A'}, Price: 1.0, Size: 1})
+	b.Push(Tick{Symbol: [8]byte{'B'}, Price: 2.0, Size: 2})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := b.Start(ctx)
+
+	var payload []byte
+	select {
+	case payload = <-sink.ch:
+	case <-time.After(500 * time.Millisecond):
+		cancel()
+		<-done
+		t.Fatal("timed out waiting for Sink.Flush")
+	}
+
+	cancel()
+	<-done
+
+	wantLen := headerSize + tickSize
+	if len(payload) != wantLen {
+		t.Fatalf("payload length: got %d, want %d", len(payload), wantLen)
+	}
+	count := uint16(payload[4]) | uint16(payload[5])<<8
+	if count != 1 {
+		t.Errorf("item count: got %d, want 1 (overflow item must be silently dropped)", count)
+	}
+}
+
+// TestStdoutSinkFlush verifies that StdoutSink.Flush writes without error.
+func TestStdoutSinkFlush(t *testing.T) {
+	s := StdoutSink{}
+	if err := s.Flush([]byte("test payload")); err != nil {
+		t.Errorf("StdoutSink.Flush returned unexpected error: %v", err)
+	}
+}
+
 // BenchmarkPush is the Phase 1 performance gate.
 // Success criterion: 0 B/op and 0 allocs/op.
 func BenchmarkPush(b *testing.B) {
