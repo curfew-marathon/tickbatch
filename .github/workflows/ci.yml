@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }} / ${{ matrix.goarch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goarch: amd64
+          - os: macos-latest
+            goarch: arm64
+          - os: windows-latest
+            goarch: amd64
+    env:
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Run tests with race detector
+        run: go test -v -race ./...
+
+  benchmark:
+    name: Zero-Allocation Enforcer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Run benchmarks
+        run: go test -bench=. -benchmem ./... | tee bench.out
+
+      - name: Enforce zero-allocation contract
+        shell: bash
+        run: |
+          echo "=== Benchmark Results ==="
+          cat bench.out
+          echo ""
+          echo "=== Checking allocs/op ==="
+          awk '
+            /allocs\/op/ {
+              for (i = 1; i <= NF; i++) {
+                if ($i == "allocs/op" && $(i-1) + 0 > 0) {
+                  print "VIOLATION: " $0
+                  found = 1
+                }
+              }
+            }
+            END {
+              if (found) {
+                print "\nFAIL: Zero-allocation contract violated on the hot path."
+                exit 1
+              } else {
+                print "OK: All benchmarks satisfy the zero-allocation contract."
+              }
+            }
+          ' bench.out
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
