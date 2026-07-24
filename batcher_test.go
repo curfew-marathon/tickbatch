@@ -64,7 +64,7 @@ func (c *countingSink) Flush(_ []byte) error {
 // TestPushPop verifies the fundamental FIFO contract: a value pushed must be
 // the exact value returned on the next pop, with no corruption or reordering.
 func TestPushPop(t *testing.T) {
-	b := New[UecarrixTelemetry](Config{QueueSize: 16})
+	b := New[UecarrixTelemetry](Config{QueueSize: 16, MaxBatchSize: headerSize})
 
 	frames := []UecarrixTelemetry{
 		{RPM: 800, Speed: 0, Steering: 0},
@@ -88,7 +88,7 @@ func TestPushPop(t *testing.T) {
 // must silently drop items and never block or panic.
 func TestPushOnFullQueueDrops(t *testing.T) {
 	const size = 4
-	b := New[UecarrixTelemetry](Config{QueueSize: size})
+	b := New[UecarrixTelemetry](Config{QueueSize: size, MaxBatchSize: headerSize})
 
 	filler := UecarrixTelemetry{RPM: 1000}
 	for i := 0; i < size; i++ {
@@ -165,10 +165,11 @@ type Tick struct {
 
 // Marshal implements [Serializable] by writing each field directly into buf via
 // unsafe pointer casts, bypassing encoding/binary for zero-overhead serialization.
-// The written region is unsafe.Sizeof(Tick{}) bytes; the caller must supply a
-// buffer of at least that length.
+// The packed wire size is 20 bytes (8 Symbol + 8 Price + 4 Size), which is smaller
+// than unsafe.Sizeof(Tick{}) due to trailing struct padding; returning the padded
+// size would include uninitialized bytes in the payload.
 func (t Tick) Marshal(buf []byte) int {
-	const size = int(unsafe.Sizeof(Tick{}))
+	const size = 20 // 8 (Symbol) + 8 (Price) + 4 (Size); no trailing padding
 	if len(buf) < size {
 		return 0
 	}
@@ -200,7 +201,7 @@ func (c *captureSink) Flush(payload []byte) error {
 // and asserts the exact payload layout: byte length, header sequence ID, header
 // item count, and full field-level data integrity of the first decoded Tick.
 func TestTickSerialization(t *testing.T) {
-	const tickSize = int(unsafe.Sizeof(Tick{}))
+	const tickSize = 20 // packed wire size: 8 (Symbol) + 8 (Price) + 4 (Size)
 
 	sink := &captureSink{ch: make(chan []byte, 1)}
 	b := New[Tick](Config{
@@ -273,7 +274,7 @@ func TestNewPanicsOnZeroQueueSize(t *testing.T) {
 			t.Error("New with QueueSize=0 did not panic")
 		}
 	}()
-	New[UecarrixTelemetry](Config{QueueSize: 0})
+	New[UecarrixTelemetry](Config{QueueSize: 0, MaxBatchSize: headerSize})
 }
 
 // TestNewPanicsOnNonPowerOfTwoQueueSize verifies that New panics when QueueSize
@@ -284,7 +285,7 @@ func TestNewPanicsOnNonPowerOfTwoQueueSize(t *testing.T) {
 			t.Error("New with non-power-of-two QueueSize did not panic")
 		}
 	}()
-	New[UecarrixTelemetry](Config{QueueSize: 3})
+	New[UecarrixTelemetry](Config{QueueSize: 3, MaxBatchSize: headerSize})
 }
 
 // TestStartPanicsOnNonPositiveTickRate verifies that Start panics when
@@ -295,7 +296,7 @@ func TestStartPanicsOnNonPositiveTickRate(t *testing.T) {
 			t.Error("Start with TickRate=0 did not panic")
 		}
 	}()
-	b := New[UecarrixTelemetry](Config{QueueSize: 16})
+	b := New[UecarrixTelemetry](Config{QueueSize: 16, MaxBatchSize: headerSize})
 	b.Start(context.Background())
 }
 
@@ -303,7 +304,7 @@ func TestStartPanicsOnNonPositiveTickRate(t *testing.T) {
 // fit all queued items: the drain loop must stop at capacity, drop the
 // overflow item silently, and still deliver the partial batch to the Sink.
 func TestRunLoopBufferFull(t *testing.T) {
-	const tickSize = int(unsafe.Sizeof(Tick{}))
+	const tickSize = 20 // packed wire size: 8 (Symbol) + 8 (Price) + 4 (Size)
 
 	sink := &captureSink{ch: make(chan []byte, 1)}
 	b := New[Tick](Config{
@@ -352,7 +353,7 @@ func TestStdoutSinkFlush(t *testing.T) {
 // BenchmarkPush is the Phase 1 performance gate.
 // Success criterion: 0 B/op and 0 allocs/op.
 func BenchmarkPush(b *testing.B) {
-	batcher := New[UecarrixTelemetry](Config{QueueSize: 1 << 16})
+	batcher := New[UecarrixTelemetry](Config{QueueSize: 1 << 16, MaxBatchSize: headerSize})
 	item := UecarrixTelemetry{RPM: 9000, Speed: 200, Steering: 0.1}
 
 	b.ResetTimer()

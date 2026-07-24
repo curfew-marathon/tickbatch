@@ -46,7 +46,6 @@ On every tick, a pre-allocated drain loop sweeps the ring, serializes straight i
 - **🔒 Lock-Free MPMC Ring Buffer.** The Dmitry Vyukov sequence-based algorithm. No mutexes. Multiple producers, single consumer. Scales to any number of pushing goroutines.
 - **🧠 Cache-Line Padding.** The head and tail cursors are physically separated by 64 bytes of padding. They live on different CPU cache lines. False sharing between producer and consumer cores is structurally impossible.
 - **⚡ Bare-Metal `unsafe` Serialization.** The `Serializable` interface encodes your struct directly into a caller-supplied `[]byte` via `unsafe.Pointer` casting. No `encoding/binary`. No reflection. C-level throughput.
-- **📐 Vectorized Delta Encoding.** The drain loop XORs the current payload against the previous frame using 64-bit chunked `unsafe.Slice` casting, letting the CPU process diffs in 8-byte strides. Only deltas hit the wire.
 - **🔌 Bring Your Own Transport.** The `Sink` interface is a single method: `Flush(payload []byte) error`. UDP, TCP, shared memory, Kafka: anything goes.
 - **🛡️ Graceful Degradation.** Backpressure never crashes the host. Full queue means silent drop. The pusher is never blocked.
 - **🧪 Pure Go.** Zero CGO. Zero external dependencies. Cross-compiles to every GOOS/GOARCH without a C toolchain.
@@ -225,9 +224,7 @@ All cursor and sequence operations use `sync/atomic`. In Go's memory model, atom
 
 ### The Tick Engine
 
-`Start` spawns a single background goroutine running a `time.Ticker` at `Config.TickRate` Hz. On each tick, the drain loop sweeps the ring into a pre-allocated `[]T` slice, serializes each item into a pre-allocated `[]byte` buffer via `Marshal`, and calls `Sink.Flush` with the resulting payload slice. Both buffers are sized at construction and never reallocated. The tick goroutine exits cleanly when the context is canceled, and the returned channel closes to signal completion.
-
-For latency-critical deployments, a SpinTick mode replaces the `time.Ticker` with a busy-loop that yields via `runtime.Gosched` between polls, trading CPU burn for sub-millisecond drain latency on near-empty queues. This is the appropriate configuration for co-located HFT infrastructure where a dedicated core is acceptable cost.
+`Start` spawns a single background goroutine running a `time.Ticker` at `Config.TickRate` Hz. On each tick, the drain loop calls `popMarshal` in a tight loop, atomically dequeuing each item and marshaling it directly into a pre-allocated `[]byte` buffer via the `Serializable` interface. When the buffer is full or the ring is empty, the loop stops and `Sink.Flush` is called with the accumulated payload. The byte buffer is sized at construction and never reallocated. The tick goroutine exits cleanly when the context is canceled, and the returned channel closes to signal completion.
 
 ### Observability
 
@@ -239,9 +236,9 @@ Every component is designed for production instrumentation. Wrap `Sink.Flush` to
 
 tickbatch is purpose-built for infrastructure where GC pauses are a reliability failure, not a performance nuisance.
 
-**L2 Market Data Ingestion.** Order book quote updates, top-of-book deltas, and trade confirmations arrive in microsecond bursts from exchange feeds. tickbatch absorbs the spike lock-free and delivers batched, delta-encoded payloads to downstream consumers at a controlled rate. Zero-allocation Go means the GC never interrupts your critical path at the moment of highest market volatility.
+**L2 Market Data Ingestion.** Order book quote updates, top-of-book deltas, and trade confirmations arrive in microsecond bursts from exchange feeds. tickbatch absorbs the spike lock-free and delivers batched payloads to downstream consumers at a controlled rate. Zero-allocation Go means the GC never interrupts your critical path at the moment of highest market volatility.
 
-**Order Book Synchronization.** Propagating full order book state across a low-latency network fabric requires coalescing thousands of individual price level updates into a single wire frame per interval. tickbatch handles the coalescion and serialization entirely within pre-allocated memory, with no per-update heap activity.
+**Order Book Synchronization.** Propagating full order book state across a low-latency network fabric requires coalescing thousands of individual price level updates into a single wire frame per interval. tickbatch handles the coalescing and serialization entirely within pre-allocated memory, with no per-update heap activity.
 
 **High-Throughput Financial Auditing.** Compliance pipelines must capture every order, fill, and cancellation event without imposing latency on the trading path. tickbatch provides a non-blocking ingest point that the trading engine pushes into at full speed, with a separate drain loop delivering ordered, serialized audit records to durable storage.
 

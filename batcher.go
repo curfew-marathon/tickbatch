@@ -2,6 +2,7 @@ package tickbatch
 
 import (
 	"context"
+	"math"
 	"sync/atomic"
 	"time"
 )
@@ -13,6 +14,14 @@ const headerSize = 8
 
 // Config holds construction parameters for a [Batcher].
 type Config struct {
+	// Sink is the transport that receives each flushed payload.
+	// If nil, drained batches are serialized but not delivered.
+	Sink Sink
+
+	// OnFlushError, if non-nil, is called whenever Sink.Flush returns an error.
+	// It is invoked from the drain goroutine and must be goroutine-safe.
+	OnFlushError func(error)
+
 	// QueueSize is the capacity of the internal ring buffer.
 	// It must be a positive power of two (e.g. 1<<10 for 1024 slots).
 	QueueSize uint64
@@ -25,29 +34,25 @@ type Config struct {
 	// A value of 60 causes the engine to wake and flush the queue 60 times per second.
 	// It must be positive when [Batcher.Start] is called.
 	TickRate int
-
-	// Sink is the transport that receives each flushed payload.
-	// If nil, drained batches are serialized but not delivered.
-	Sink Sink
-
-	// OnFlushError, if non-nil, is called whenever Sink.Flush returns an error.
-	// It is invoked from the drain goroutine and must be goroutine-safe.
-	OnFlushError func(error)
 }
 
 // Batcher is a generic, lock-free telemetry batching engine.
 //
 // The zero value is not usable; construct via [New].
 type Batcher[T Serializable] struct {
+	byteBuffer []byte
 	ring       *ringbuf[T]
 	cfg        Config
 	sequenceID atomic.Uint32
-	byteBuffer []byte
 }
 
 // New allocates and returns a ready-to-use Batcher.
-// It panics if cfg.QueueSize is zero or not a power of two.
+// It panics if cfg.QueueSize is zero or not a power of two, or if
+// cfg.MaxBatchSize is smaller than headerSize.
 func New[T Serializable](cfg Config) *Batcher[T] {
+	if cfg.MaxBatchSize < headerSize {
+		panic("tickbatch: Config.MaxBatchSize must be at least headerSize bytes")
+	}
 	return &Batcher[T]{
 		ring:       newRingbuf[T](cfg.QueueSize),
 		cfg:        cfg,
@@ -96,7 +101,7 @@ func (b *Batcher[T]) runLoop(ctx context.Context) {
 		case <-ticker.C:
 			offset := headerSize
 			n := 0
-			for {
+			for n < math.MaxUint16 {
 				written, ok := b.ring.popMarshal(b.byteBuffer[offset:])
 				if !ok {
 					break

@@ -52,7 +52,7 @@ func (r *ringbuf[T]) push(item T) bool {
 		pos := r.tail.Load()
 		s := &r.data[pos&r.mask]
 		seq := s.seq.Load()
-		diff := int64(seq) - int64(pos)
+		diff := int64(seq - pos)
 
 		switch {
 		case diff == 0:
@@ -85,7 +85,7 @@ func (r *ringbuf[T]) popMarshal(buf []byte) (int, bool) {
 		pos := r.head.Load()
 		s := &r.data[pos&r.mask]
 		seq := s.seq.Load()
-		diff := int64(seq) - int64(pos+1)
+		diff := int64(seq - (pos + 1))
 
 		switch {
 		case diff == 0:
@@ -106,7 +106,7 @@ func (r *ringbuf[T]) pop(item *T) bool {
 		pos := r.head.Load()
 		s := &r.data[pos&r.mask]
 		seq := s.seq.Load()
-		diff := int64(seq) - int64(pos+1)
+		diff := int64(seq - (pos + 1))
 
 		switch {
 		case diff == 0:

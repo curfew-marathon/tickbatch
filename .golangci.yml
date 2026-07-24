@@ -11,47 +11,55 @@ linters:
     - wastedassign   # catches assignments whose result is never used
     - depguard       # absolutely enforces zero third-party dependencies
 
-linters-settings:
-  depguard:
-    rules:
-      main:
-        files:
-          - $all
-        allow:
-          - $gostd   # strictly allow only the Go Standard Library
-  revive:
-    rules:
-      - name: exported
-        severity: error
-        arguments:
-          - "checkPrivateReceivers"
-          - "sayRepetitiveInsteadOfStutters"
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - performance
-    disabled-checks:
-      - appendAssign   # intentional in ring buffer slot recycling
-  godot:
-    scope: declarations
-    capital: true
-  misspell:
-    locale: US
-  govet:
-    enable:
-      - fieldalignment # enforces optimal memory packing for bare-metal structs
+  settings:
+    depguard:
+      rules:
+        main:
+          files:
+            - $all
+          allow:
+            - $gostd   # strictly allow only the Go Standard Library
+    revive:
+      rules:
+        - name: exported
+          severity: error
+          arguments:
+            - "checkPrivateReceivers"
+            - "sayRepetitiveInsteadOfStutters"
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-checks:
+        - appendAssign   # intentional in ring buffer slot recycling
+    godot:
+      scope: declarations
+      capital: true
+    misspell:
+      locale: US
+    govet:
+      enable:
+        - fieldalignment # enforces optimal memory packing for bare-metal structs
 
-issues:
-  exclude-rules:
-    # unsafe is explicitly mandated by the project for bare-metal serialization
-    # and vectorized operations; suppress the blanket unsafe warning.
-    - linters:
-        - gosec
-      text: "use of unsafe"
+  exclusions:
+    rules:
+      # unsafe is explicitly mandated by the project for bare-metal serialization
+      # and vectorized operations; suppress the blanket unsafe warning.
+      - linters:
+          - gosec
+        text: "use of unsafe"
 
-    # Padding fields ("_ [64]byte") are intentional false-sharing guards —
-    # not dead code.
-    - linters:
-        - revive
-      text: "unused-parameter"
-      path: "ringbuf\\.go"
+      # Padding fields ("_ [64]byte") are intentional false-sharing guards —
+      # not dead code.
+      - linters:
+          - revive
+        text: "unused-parameter"
+        path: "ringbuf\\.go"
+
+      # The [64]byte padding in ringbuf and generic slot struct cause the
+      # fieldalignment analyzer to report misleading suggestions; the padding
+      # is a deliberate architectural choice to prevent false sharing.
+      - linters:
+          - govet
+        text: "fieldalignment"
+        path: "ringbuf\\.go"
