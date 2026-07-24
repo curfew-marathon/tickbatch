@@ -28,7 +28,7 @@ type ringbuf[T Serializable] struct {
 	data []slot[T]
 }
 
-// newRingbuf allocates a ring buffer. size must be a positive power of two;
+// newRingbuf allocates a ring buffer. The size must be a positive power of two;
 // it panics otherwise.
 func newRingbuf[T Serializable](size uint64) *ringbuf[T] {
 	if size == 0 || size&(size-1) != 0 {
