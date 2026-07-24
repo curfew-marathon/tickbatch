@@ -1,0 +1,102 @@
+package tickbatch
+
+import "sync/atomic"
+
+// slot is a single cell in the ring buffer. It pairs an item with a sequence
+// number used by the Vyukov MPMC algorithm to coordinate producers and consumers
+// without locks.
+type slot[T Serializable] struct {
+	seq  atomic.Uint64
+	item T
+}
+
+// ringbuf is a fixed-capacity, lock-free MPMC queue using the Dmitry Vyukov
+// sequence-based algorithm.
+//
+// The head and tail cursors are separated by 64 bytes of padding to place them
+// on distinct CPU cache lines. Without this, every write to tail invalidates the
+// cache line holding head on all other cores — a phenomenon called False Sharing
+// that can collapse throughput by an order of magnitude.
+type ringbuf[T Serializable] struct {
+	_    [8]byte // align head to its own cache line start
+	head atomic.Uint64
+	_    [64]byte // padding: isolates head from tail in the CPU cache
+
+	tail atomic.Uint64
+	_    [64]byte // padding: isolates tail from subsequent fields
+
+	mask uint64
+	data []slot[T]
+}
+
+// newRingbuf allocates a ring buffer. size must be a power of two.
+func newRingbuf[T Serializable](size uint64) *ringbuf[T] {
+	r := &ringbuf[T]{
+		mask: size - 1,
+		data: make([]slot[T], size),
+	}
+	// Each slot's initial sequence equals its index. This is the starting
+	// invariant that the Vyukov algorithm depends on.
+	for i := range r.data {
+		r.data[i].seq.Store(uint64(i))
+	}
+	return r
+}
+
+// push attempts to enqueue item. Returns false if the buffer is full.
+func (r *ringbuf[T]) push(item T) bool {
+	for {
+		pos := r.tail.Load()
+		s := &r.data[pos&r.mask]
+		seq := s.seq.Load()
+		diff := int64(seq) - int64(pos)
+
+		switch {
+		case diff == 0:
+			// Slot is ready for a producer at this position. Race to claim it.
+			if r.tail.CompareAndSwap(pos, pos+1) {
+				s.item = item
+				// Publish to consumers: seq advances to pos+1, which is the
+				// value the pop path waits for.
+				s.seq.Store(pos + 1)
+				return true
+			}
+			// Another producer won the CAS; retry from the new tail.
+		case diff < 0:
+			// seq has fallen behind pos, meaning the slot has not yet been
+			// recycled by a consumer. The buffer is full.
+			return false
+		default:
+			// seq > pos: another producer already advanced tail past pos.
+			// Reload tail and retry.
+		}
+	}
+}
+
+// pop attempts to dequeue into item. Returns false if the buffer is empty.
+func (r *ringbuf[T]) pop(item *T) bool {
+	for {
+		pos := r.head.Load()
+		s := &r.data[pos&r.mask]
+		seq := s.seq.Load()
+		diff := int64(seq) - int64(pos+1)
+
+		switch {
+		case diff == 0:
+			// Slot has been written by a producer at this position. Race to consume it.
+			if r.head.CompareAndSwap(pos, pos+1) {
+				*item = s.item
+				// Recycle the slot: advance seq to pos+mask+1, which signals
+				// that a producer may use this slot again in the next lap.
+				s.seq.Store(pos + r.mask + 1)
+				return true
+			}
+		case diff < 0:
+			// seq has not yet reached pos+1; the producer hasn't written here.
+			// The buffer is empty from this consumer's perspective.
+			return false
+		default:
+			// Another consumer already advanced head; reload and retry.
+		}
+	}
+}
