@@ -1,0 +1,48 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - gocritic       # catches subtle Go pitfalls and style issues
+    - godot          # enforces punctuation on GoDoc comments
+    - revive         # GoDoc presence on all exported identifiers
+    - misspell       # typos in comments and strings
+    - prealloc       # flags slice append loops that could be pre-allocated
+    - unconvert      # removes unnecessary type conversions
+    - wastedassign   # catches assignments whose result is never used
+
+linters-settings:
+  revive:
+    rules:
+      - name: exported
+        severity: error
+        arguments:
+          - "checkPrivateReceivers"
+          - "sayRepetitiveInsteadOfStutters"
+
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - performance
+    disabled-checks:
+      - appendAssign   # intentional in ring buffer slot recycling
+
+  godot:
+    scope: declarations
+    capital: true
+
+  misspell:
+    locale: US
+
+issues:
+  exclude-rules:
+    # unsafe is explicitly mandated by the project for bare-metal serialization
+    # and vectorized operations; suppress the blanket unsafe warning.
+    - linters: [gosec]
+      text: "use of unsafe"
+
+    # Padding fields ("_ [64]byte") are intentional false-sharing guards —
+    # not dead code.
+    - linters: [revive]
+      text: "unused-parameter"
+      path: "ringbuf\\.go"
