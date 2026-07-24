@@ -16,18 +16,18 @@ To push Go's performance to the absolute limit, this project aggressively avoids
 
 ## Phase 2: The Tick Engine & Zero-Alloc Drain
 **Goal:** Extract data at a specific Hz rate without allocating new memory per tick.
-- [ ] Define the `Sink` interface (`Flush(payload []byte) error`).
-- [ ] Implement a simple `StdoutSink` for testing.
-- [ ] Pre-allocate a `[]T` slice and a `[]byte` buffer inside the `Batcher` struct during initialization.
-- [ ] Write `runLoop()` utilizing `time.Ticker` to safely drain the ring buffer into the pre-allocated slices (preventing per-tick allocations).
-- [ ] **Testable Deliverable:** A functional main program batching dummy state and printing it exactly 60 times a second.
+- [x] Define the `Sink` interface (`Flush(payload []byte) error`).
+- [x] Implement a simple `StdoutSink` for testing.
+- [x] Pre-allocate a `[]byte` buffer inside the `Batcher` struct during initialization.
+- [x] Write `runLoop()` utilizing `time.Ticker` to safely drain the ring buffer into the pre-allocated buffer (preventing per-tick allocations).
+- [x] **Testable Deliverable:** `marketsim` sample app batching 8-instrument market data at 60 Hz and printing a live throughput table.
 
 ## Phase 3: Bare-Metal Serialization (The Bytes)
 **Goal:** Utilize the `Serializable` interface and `unsafe` to pack the pre-allocated buffers at C-level speeds.
-- [ ] Implement the logic inside the drain loop to call `item.Marshal(buf)` on every popped item.
-- [ ] Implement lightweight payload headers (e.g., Sequence ID, Batch Count) at the front of the byte buffer.
-- [ ] **Hardware Optimization:** Bypass `encoding/binary` overhead inside the implementation examples by utilizing `unsafe.Pointer` casting for primitive types (e.g., casting a `float32` directly into 4 bytes) for absolute zero-overhead serialization.
-- [ ] **Testable Deliverable:** A `MockSink` test asserting the exact byte length, structure, and endianness of a flushed payload.
+- [x] Add `popMarshal` to `ringbuf`: marshals each item directly from its ring slot into `byteBuffer`, eliminating the intermediate `drainSlice` (ring slot → byteBuffer in one step).
+- [x] Implement 8-byte payload header: `[0:4]` uint32 sequence ID, `[4:6]` uint16 item count (both little-endian via byte-shifting), `[6:8]` reserved.
+- [x] **Hardware Optimization:** `Tick.Marshal` uses `unsafe.Pointer` field-level casts (`*(*float64)(unsafe.Pointer(&buf[8]))`) to bypass `encoding/binary`.
+- [x] **Testable Deliverable:** `TestTickSerialization` asserts exact payload byte length, header sequence ID, header item count, and full field-level data integrity of the decoded first `Tick`.
 
 ## Phase 4: Backpressure & The Stress Test Suite
 **Goal:** Prove the library holds up under extreme load and handles full queues gracefully.
