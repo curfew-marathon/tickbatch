@@ -63,3 +63,12 @@ linters:
           - govet
         text: "fieldalignment"
         path: "ringbuf\\.go"
+
+      # Config is an 80-byte value type passed to New[T] exactly once at
+      # construction time; the copy cost is negligible and keeping it as a value
+      # type avoids an extra indirection and matches the ergonomic zero-value
+      # initialization pattern used throughout the test suite.
+      - linters:
+          - gocritic
+        text: "hugeParam"
+        path: "batcher\\.go"
