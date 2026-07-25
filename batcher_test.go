@@ -636,6 +636,102 @@ func TestDeltaEncodingReconstruction(t *testing.T) {
 	}
 }
 
+// blockingMockSink is a chaos test-only Sink that sleeps for 50 ms inside
+// Flush to simulate a stalled downstream network or disk target. The flushing
+// field is set atomically while the sleep is in progress so tests can observe
+// exactly when the drain goroutine is blocked.
+type blockingMockSink struct {
+	flushing atomic.Bool
+	count    atomic.Int64
+}
+
+// Flush sleeps for 50 ms, recording the stall window via the flushing flag.
+func (s *blockingMockSink) Flush(_ []byte) error {
+	s.flushing.Store(true)
+	time.Sleep(50 * time.Millisecond)
+	s.flushing.Store(false)
+	s.count.Add(1)
+	return nil
+}
+
+// TestNonBlockingPushDuringStalledFlush proves that Push never blocks on a
+// stalled downstream Sink. While the drain goroutine is sleeping inside
+// Flush for 50 ms, a producer goroutine must be able to call Push and return
+// in under 5 ms — it writes only to the lock-free ring buffer, which is
+// completely decoupled from the Sink call path.
+func TestNonBlockingPushDuringStalledFlush(t *testing.T) {
+	sink := &blockingMockSink{}
+	b := New[MarketTick](Config{
+		QueueSize:    1 << 10,
+		MaxBatchSize: 4096,
+		TickRate:     200,
+		Sink:         sink,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := b.Start(ctx)
+	defer func() { cancel(); <-done }()
+
+	item := MarketTick{Price: 100.0, Volume: 1.0, Spread: 0.01}
+
+	// Push enough items to trigger the first drain cycle.
+	for i := 0; i < 10; i++ {
+		b.Push(item)
+	}
+
+	// Wait until the drain goroutine is inside Flush (blocked for 50 ms).
+	deadline := time.Now().Add(time.Second)
+	for !sink.flushing.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("flush did not start within 1s")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Push while Flush is sleeping; must return instantly (ring-buffer CAS only).
+	start := time.Now()
+	b.Push(item)
+	elapsed := time.Since(start)
+
+	const maxElapsed = 5 * time.Millisecond
+	if elapsed > maxElapsed {
+		t.Errorf("Push blocked for %v while sink was stalled (want < %v); "+
+			"producer must never be coupled to downstream I/O", elapsed, maxElapsed)
+	}
+}
+
+// TestGracefulShutdown verifies that canceling the context causes runLoop to
+// drain any remaining ring-buffer items and execute a final Sink.Flush before
+// the goroutine exits, with no goroutine leak.
+func TestGracefulShutdown(t *testing.T) {
+	sink := &countingSink{}
+	b := New[MarketTick](Config{
+		QueueSize:    1 << 10,
+		MaxBatchSize: 4096,
+		TickRate:     1, // 1 Hz — first tick is 1 s away, ensuring cancel fires first
+		Sink:         sink,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := b.Start(ctx)
+
+	item := MarketTick{Price: 100.0, Volume: 1.0, Spread: 0.01}
+	for i := 0; i < 5; i++ {
+		b.Push(item)
+	}
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("runLoop goroutine did not exit within 500ms after context cancellation")
+	}
+
+	if sink.count.Load() == 0 {
+		t.Fatal("expected at least one Sink.Flush from the graceful shutdown drain; got none")
+	}
+}
+
 const xorBenchSize = 4096
 
 // BenchmarkXORBytesVectorized measures throughput of the unsafe.Slice uint64-word

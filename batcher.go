@@ -153,9 +153,97 @@ func (b *Batcher[T]) Start(ctx context.Context) <-chan struct{} {
 	return done
 }
 
+// drainAndFlush dequeues all available items from the ring buffer, serializes
+// them into the pre-allocated byteBuffer, and delivers the payload to the
+// configured Sink. The prevOffset argument tracks the previous frame's byte
+// length for delta-encoding stale-byte zeroing. It performs zero heap
+// allocations.
+func (b *Batcher[T]) drainAndFlush(prevOffset *int) {
+	offset := headerSize
+	n := 0
+	for n < math.MaxUint16 {
+		written, ok := b.ring.popMarshal(b.byteBuffer[offset:])
+		if !ok {
+			break
+		}
+		if written == 0 {
+			break
+		}
+		offset += written
+		n++
+	}
+	if n == 0 || b.cfg.Sink == nil {
+		return
+	}
+
+	seq := b.sequenceID.Add(1)
+	b.byteBuffer[0] = byte(seq)
+	b.byteBuffer[1] = byte(seq >> 8)
+	b.byteBuffer[2] = byte(seq >> 16)
+	b.byteBuffer[3] = byte(seq >> 24)
+	count := uint16(n)
+	b.byteBuffer[4] = byte(count)
+	b.byteBuffer[5] = byte(count >> 8)
+	b.byteBuffer[6] = 0
+	b.byteBuffer[7] = 0
+
+	if !b.cfg.DeltaEncoding {
+		payload := b.byteBuffer[:offset]
+		if b.cfg.Compressor != nil {
+			cn, cerr := b.cfg.Compressor.Compress(b.compressBuffer, payload)
+			if cerr != nil {
+				if b.cfg.OnFlushError != nil {
+					b.cfg.OnFlushError(cerr)
+				}
+				return
+			}
+			if cn < 0 || cn > len(b.compressBuffer) {
+				if b.cfg.OnFlushError != nil {
+					b.cfg.OnFlushError(fmt.Errorf("tickbatch: compressor returned out-of-range n=%d", cn))
+				}
+				return
+			}
+			payload = b.compressBuffer[:cn]
+		}
+		if err := b.cfg.Sink.Flush(payload); err != nil && b.cfg.OnFlushError != nil {
+			b.cfg.OnFlushError(err)
+		}
+		return
+	}
+
+	XORBytes(b.deltaBuffer[:offset], b.byteBuffer[:offset], b.previousState[:offset])
+	payload := b.deltaBuffer[:offset]
+	if b.cfg.Compressor != nil {
+		cn, cerr := b.cfg.Compressor.Compress(b.compressBuffer, payload)
+		if cerr != nil {
+			if b.cfg.OnFlushError != nil {
+				b.cfg.OnFlushError(cerr)
+			}
+			return
+		}
+		if cn < 0 || cn > len(b.compressBuffer) {
+			if b.cfg.OnFlushError != nil {
+				b.cfg.OnFlushError(fmt.Errorf("tickbatch: compressor returned out-of-range n=%d", cn))
+			}
+			return
+		}
+		payload = b.compressBuffer[:cn]
+	}
+	if err := b.cfg.Sink.Flush(payload); err != nil && b.cfg.OnFlushError != nil {
+		b.cfg.OnFlushError(err)
+	} else if err == nil {
+		copy(b.previousState[:offset], b.byteBuffer[:offset])
+		if *prevOffset > offset {
+			clear(b.previousState[offset:*prevOffset])
+		}
+		*prevOffset = offset
+	}
+}
+
 // runLoop is the internal drain loop. It ticks at cfg.TickRate Hz, draining
 // the ring buffer into the pre-allocated slices and flushing serialized payloads
-// to the configured Sink on every wake.
+// to the configured Sink on every wake. When the context is canceled, it performs
+// one final drain to flush any remaining items before exiting.
 func (b *Batcher[T]) runLoop(ctx context.Context) {
 	ticker := time.NewTicker(time.Second / time.Duration(b.cfg.TickRate))
 	defer ticker.Stop()
@@ -165,87 +253,10 @@ func (b *Batcher[T]) runLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			b.drainAndFlush(&prevOffset)
 			return
 		case <-ticker.C:
-			offset := headerSize
-			n := 0
-			for n < math.MaxUint16 {
-				written, ok := b.ring.popMarshal(b.byteBuffer[offset:])
-				if !ok {
-					break
-				}
-				if written == 0 {
-					break
-				}
-				offset += written
-				n++
-			}
-			if n == 0 || b.cfg.Sink == nil {
-				continue
-			}
-
-			seq := b.sequenceID.Add(1)
-			b.byteBuffer[0] = byte(seq)
-			b.byteBuffer[1] = byte(seq >> 8)
-			b.byteBuffer[2] = byte(seq >> 16)
-			b.byteBuffer[3] = byte(seq >> 24)
-			count := uint16(n)
-			b.byteBuffer[4] = byte(count)
-			b.byteBuffer[5] = byte(count >> 8)
-			b.byteBuffer[6] = 0
-			b.byteBuffer[7] = 0
-
-			if !b.cfg.DeltaEncoding {
-				payload := b.byteBuffer[:offset]
-				if b.cfg.Compressor != nil {
-					n, cerr := b.cfg.Compressor.Compress(b.compressBuffer, payload)
-					if cerr != nil {
-						if b.cfg.OnFlushError != nil {
-							b.cfg.OnFlushError(cerr)
-						}
-						continue
-					}
-					if n < 0 || n > len(b.compressBuffer) {
-						if b.cfg.OnFlushError != nil {
-							b.cfg.OnFlushError(fmt.Errorf("tickbatch: compressor returned out-of-range n=%d", n))
-						}
-						continue
-					}
-					payload = b.compressBuffer[:n]
-				}
-				if err := b.cfg.Sink.Flush(payload); err != nil && b.cfg.OnFlushError != nil {
-					b.cfg.OnFlushError(err)
-				}
-				continue
-			}
-
-			XORBytes(b.deltaBuffer[:offset], b.byteBuffer[:offset], b.previousState[:offset])
-			payload := b.deltaBuffer[:offset]
-			if b.cfg.Compressor != nil {
-				n, cerr := b.cfg.Compressor.Compress(b.compressBuffer, payload)
-				if cerr != nil {
-					if b.cfg.OnFlushError != nil {
-						b.cfg.OnFlushError(cerr)
-					}
-					continue
-				}
-				if n < 0 || n > len(b.compressBuffer) {
-					if b.cfg.OnFlushError != nil {
-						b.cfg.OnFlushError(fmt.Errorf("tickbatch: compressor returned out-of-range n=%d", n))
-					}
-					continue
-				}
-				payload = b.compressBuffer[:n]
-			}
-			if err := b.cfg.Sink.Flush(payload); err != nil && b.cfg.OnFlushError != nil {
-				b.cfg.OnFlushError(err)
-			} else if err == nil {
-				copy(b.previousState[:offset], b.byteBuffer[:offset])
-				if prevOffset > offset {
-					clear(b.previousState[offset:prevOffset])
-				}
-				prevOffset = offset
-			}
+			b.drainAndFlush(&prevOffset)
 		}
 	}
 }
