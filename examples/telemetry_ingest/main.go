@@ -45,7 +45,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("tickbatch: dial udp: %v", err)
 	}
-	defer sink.Close()
+	defer func() {
+		if err := sink.Close(); err != nil {
+			log.Printf("tickbatch: close udp sink: %v", err)
+		}
+	}()
 
 	b := tickbatch.New[RiskEvent](tickbatch.Config{
 		Sink:          sink,
