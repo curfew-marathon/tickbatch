@@ -26,6 +26,8 @@ type ringbuf[T Serializable] struct {
 
 	mask uint64
 	data []slot[T]
+	_    [16]byte      // padding: places evicted on its own cache line (mask+data=32 B)
+	evicted atomic.Uint64
 }
 
 // newRingbuf allocates a ring buffer. The size must be a positive power of two;
@@ -84,6 +86,7 @@ func (r *ringbuf[T]) push(item T, policy BackpressurePolicy) bool {
 				if hs.seq.Load() == headPos+1 {
 					if r.head.CompareAndSwap(headPos, headPos+1) {
 						hs.seq.Store(headPos + r.mask + 1)
+						r.evicted.Add(1)
 					}
 				}
 				// Retry regardless: if the CAS lost or the slot was not yet

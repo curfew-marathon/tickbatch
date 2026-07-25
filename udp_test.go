@@ -54,6 +54,7 @@ func TestUDPSinkIntegration(t *testing.T) {
 	b := New[OrderUpdate](Config{
 		QueueSize:    16,
 		MaxBatchSize: headerSize + 16*itemSize,
+		MaxItemSize:  itemSize,
 		TickRate:     200,
 		Sink:         udpSink,
 		Compressor:   passThroughCompressor{},
