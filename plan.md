@@ -16,18 +16,18 @@ To push Go's performance to the absolute limit, this project aggressively avoids
 
 ## Phase 2: The Tick Engine & Zero-Alloc Drain
 **Goal:** Extract data at a specific Hz rate without allocating new memory per tick.
-- [ ] Define the `Sink` interface (`Flush(payload []byte) error`).
-- [ ] Implement a simple `StdoutSink` for testing.
-- [ ] Pre-allocate a `[]T` slice and a `[]byte` buffer inside the `Batcher` struct during initialization.
-- [ ] Write `runLoop()` utilizing `time.Ticker` to safely drain the ring buffer into the pre-allocated slices (preventing per-tick allocations).
-- [ ] **Testable Deliverable:** A functional main program batching dummy state and printing it exactly 60 times a second.
+- [x] Define the `Sink` interface (`Flush(payload []byte) error`).
+- [x] Implement a simple `StdoutSink` for testing.
+- [x] Pre-allocate a `[]byte` buffer inside the `Batcher` struct during initialization.
+- [x] Write `runLoop()` utilizing `time.Ticker` to safely drain the ring buffer into the pre-allocated buffer (preventing per-tick allocations).
+- [x] **Testable Deliverable:** `marketsim` sample app batching 8-instrument market data at 60 Hz and printing a live throughput table.
 
 ## Phase 3: Bare-Metal Serialization (The Bytes)
 **Goal:** Utilize the `Serializable` interface and `unsafe` to pack the pre-allocated buffers at C-level speeds.
-- [ ] Implement the logic inside the drain loop to call `item.Marshal(buf)` on every popped item.
-- [ ] Implement lightweight payload headers (e.g., Sequence ID, Batch Count) at the front of the byte buffer.
-- [ ] **Hardware Optimization:** Bypass `encoding/binary` overhead inside the implementation examples by utilizing `unsafe.Pointer` casting for primitive types (e.g., casting a `float32` directly into 4 bytes) for absolute zero-overhead serialization.
-- [ ] **Testable Deliverable:** A `MockSink` test asserting the exact byte length, structure, and endianness of a flushed payload.
+- [x] Add `popMarshal` to `ringbuf`: marshals each item directly from its ring slot into `byteBuffer`, eliminating the intermediate `drainSlice` (ring slot → byteBuffer in one step).
+- [x] Implement 8-byte payload header: `[0:4]` uint32 sequence ID, `[4:6]` uint16 item count (both little-endian via byte-shifting), `[6:8]` reserved.
+- [x] **Hardware Optimization:** `Tick.Marshal` uses `unsafe.Pointer` field-level casts (`*(*float64)(unsafe.Pointer(&buf[8]))`) to bypass `encoding/binary`.
+- [x] **Testable Deliverable:** `TestTickSerialization` asserts exact payload byte length, header sequence ID, header item count, and full field-level data integrity of the decoded first `Tick`.
 
 ## Phase 4: Backpressure & The Stress Test Suite
 **Goal:** Prove the library holds up under extreme load and handles full queues gracefully.
@@ -47,3 +47,27 @@ To push Go's performance to the absolute limit, this project aggressively avoids
 - [ ] Implement `UDPSink` using the standard `net` package (fire-and-forget).
 - [ ] Define a `Compressor` interface so users can optionally wrap their sinks in a library like `klauspost/compress/zstd`.
 - [ ] **Testable Deliverable:** Two local UDP scripts (a sender using `tickbatch` and a vanilla Go UDP listener) successfully syncing a stream of structs in real-time.
+
+## Phase 7: Fuzzing, Chaos & Reliability
+**Goal:** Defend the zero-allocation hot path and memory safety against malicious payloads, awkward memory boundaries, and downstream network failures.
+- [ ] **The Fuzzer (`unsafe` Guard):** Implement Go native fuzzing (`go test -fuzz`) targeting the Phase 3 byte-packing and Phase 5 Vectorized XOR engines. 
+- [ ] **Alignment & Boundary Verification:** Ensure the fuzzer injects randomized, non-standard byte slice lengths (e.g., 37 bytes) to mathematically prove the tail-byte fallback logic cannot segfault or panic under chaotic conditions.
+- [ ] **The Chaos Sink (Stall Protection):** Implement a `BlockingMockSink` that intentionally sleeps or hangs during the `Flush()` call. 
+- [ ] **Non-Blocking Verification:** Write a test proving that a stalled network sink processing NINJA DRIFT telemetry will not lock up the `runLoop`, ensuring the batcher continues to drain the queue and apply backpressure policies without freezing the main thread.
+- [ ] **Graceful Shutdown:** Implement a context-cancellation test (`ctx.Done()`) that proves the `runLoop` stops accepting new pushes, flushes the final remaining items in the queue to the sink, and exits cleanly without leaking goroutines or dropping the final batch.
+- [ ] **Testable Deliverable:** The library must survive a 5-minute fuzzing gauntlet and a simulated network outage chaos test while maintaining 0 allocations and 0 memory leaks.
+
+## Phase 8: SRE Observability & Ultra-Low Latency (HFT Grade)
+**Goal:** Expose zero-allocation metrics for production alerting and provide busy-spin tick modes to eliminate OS scheduler jitter for microsecond precision.
+- [ ] **Lock-Free Telemetry:** Define a `Metrics` struct utilizing `atomic.Uint64` for counters (`ItemsPushed`, `ItemsDropped`, `BatchesFlushed`, `CASRetries`). 
+- [ ] **Zero-Overhead Instrumentation:** Instrument the `Push()` and `runLoop()` methods to increment these atomic counters without introducing any heap allocations, locks, or branching overhead in the hot path.
+- [ ] **The Busy-Spin Engine:** Add a `SpinTick` boolean to the `Config`. Implement a `runSpinLoop()` alternative to the standard `time.Ticker` that utilizes a busy-wait `for` loop querying `time.Now().UnixNano()`. This trades CPU utilization for absolute, sub-millisecond precision by bypassing the Go scheduler.
+- [ ] **Hardware Affinity Documentation:** Document the explicit usage of `runtime.LockOSThread()` for consumers who need to pin the `runLoop` to a specific, isolated CPU core to keep L1/L2 caches perfectly hot and prevent NUMA node hopping.
+- [ ] **Testable Deliverable:** A benchmark test directly comparing the P99 tail latency of the standard `time.Ticker` versus the `SpinTick` busy-loop under heavy concurrent load. A secondary test asserting the atomic metrics accurately reflect dropped items during a queue-full scenario.
+
+## Phase 9: Enterprise Hardening & Bleeding-Edge Optimization
+**Goal:** Bulletproof the `unsafe` memory boundaries, eliminate OS scheduler jitter, and leverage modern Go compiler advancements for absolute maximum throughput.
+- [ ] **Native Fuzzing (`testing.F`):** Implement `FuzzTickSerialization` in `batcher_test.go`. Pump millions of randomly mutated byte slices and struct bounds into the `Marshal` and `Push` functions to mathematically prove the `unsafe` pointer arithmetic cannot trigger a segfault under hostile or malformed ingest conditions.
+- [ ] **Hardware Affinity (`runtime.LockOSThread`):** Add a `LockThread bool` to `Config`. When enabled, the `runLoop` immediately locks itself to the underlying OS thread, preventing the Go scheduler from migrating the goroutine across CPU cores. This guarantees the L1/L2 hardware caches remain perfectly hot during the batching cycle.
+- [ ] **Profile-Guided Optimization (PGO):** Run a sustained `pprof` CPU profile against the stress benchmarks to generate a `default.pgo` file. Commit this profile to the repository so the Go compiler automatically aggressively inlines `push`, `popMarshal`, and the `unsafe` casting paths for all future builds.
+- [ ] **Execution Tracing (`go tool trace`):** Build a dedicated integration test that wraps a heavily loaded `Batcher` with `trace.Start()` and `trace.Stop()`. Output a `trace.out` artifact that visually proves to consumers that the garbage collector and Go scheduler never interrupt the `SpinTick` critical path.
