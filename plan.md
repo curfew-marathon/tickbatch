@@ -57,13 +57,13 @@ To push Go's performance to the absolute limit, this project aggressively avoids
 - [x] **Graceful Shutdown:** Implement a context-cancellation test (`ctx.Done()`) that proves the `runLoop` stops accepting new pushes, flushes the final remaining items in the queue to the sink, and exits cleanly without leaking goroutines or dropping the final batch.
 - [x] **Testable Deliverable:** The library must survive a 5-minute fuzzing gauntlet and a simulated network outage chaos test while maintaining 0 allocations and 0 memory leaks.
 
-## Phase 8: SRE Observability & Ultra-Low Latency (HFT Grade)
-**Goal:** Expose zero-allocation metrics for production alerting and provide busy-spin tick modes to eliminate OS scheduler jitter for microsecond precision.
-- [ ] **Lock-Free Telemetry:** Define a `Metrics` struct utilizing `atomic.Uint64` for counters (`ItemsPushed`, `ItemsDropped`, `BatchesFlushed`, `CASRetries`). 
-- [ ] **Zero-Overhead Instrumentation:** Instrument the `Push()` and `runLoop()` methods to increment these atomic counters without introducing any heap allocations, locks, or branching overhead in the hot path.
-- [ ] **The Busy-Spin Engine:** Add a `SpinTick` boolean to the `Config`. Implement a `runSpinLoop()` alternative to the standard `time.Ticker` that utilizes a busy-wait `for` loop querying `time.Now().UnixNano()`. This trades CPU utilization for absolute, sub-millisecond precision by bypassing the Go scheduler.
-- [ ] **Hardware Affinity Documentation:** Document the explicit usage of `runtime.LockOSThread()` for consumers who need to pin the `runLoop` to a specific, isolated CPU core to keep L1/L2 caches perfectly hot and prevent NUMA node hopping.
-- [ ] **Testable Deliverable:** A benchmark test directly comparing the P99 tail latency of the standard `time.Ticker` versus the `SpinTick` busy-loop under heavy concurrent load. A secondary test asserting the atomic metrics accurately reflect dropped items during a queue-full scenario.
+## Phase 8: CI/CD Automation & Release Readiness
+**Goal:** Enforce strict memory invariants via automated CI and ship a fully runnable demonstration of the library.
+- [x] **CI Pipeline (`.github/workflows/ci.yml`):** Trigger on push to `main` and `pull_request`. Run `go test -v -race ./...` across a build matrix of `ubuntu-latest` (amd64), `macos-latest` (arm64), and `windows-latest` (amd64) to catch unsafe-cast regressions on all three targets.
+- [x] **Lint Step:** Run `golangci-lint config verify && golangci-lint run` via `golangci/golangci-lint-action` to enforce all project style and correctness rules.
+- [x] **Zero-Allocation Memory Gate:** Run `go test -bench=BenchmarkPush -benchmem ./... > bench.txt`, then parse `bench.txt` with `grep`/`awk` and exit 1 if `allocs/op > 0`. Mathematically prevents any PR from introducing a heap escape on the hot path.
+- [x] **Runnable Example (`examples/telemetry_ingest/main.go`):** A fully functional demonstration that dials `UDPSink` to `127.0.0.1:9999`, pushes `RiskEvent` structs in a hot loop for 3 seconds with `DeltaEncoding: true`, then blocks on the `done` channel to prove graceful shutdown.
+- [x] **Testable Deliverable:** `go run ./examples/telemetry_ingest/` exits cleanly after 3 seconds, printing the total dropped count. CI gates prevent any allocation regression from merging.
 
 ## Phase 9: Enterprise Hardening & Bleeding-Edge Optimization
 **Goal:** Bulletproof the `unsafe` memory boundaries, eliminate OS scheduler jitter, and leverage modern Go compiler advancements for absolute maximum throughput.

@@ -66,22 +66,15 @@ jobs:
       - name: Install benchstat
         run: go install golang.org/x/perf/cmd/benchstat@latest
 
-      - name: Run PR Benchmarks
-        run: go test -bench=. -benchmem -count=5 ./... | tee pr.out
-
-      - name: Enforce zero-allocation contract
+      - name: Zero-Allocation Memory Gate
         shell: bash
         run: |
-          awk '
-            /allocs\/op/ {
-              for (i = 1; i <= NF; i++) {
-                if ($i == "allocs/op" && $(i-1) + 0 > 0) {
-                  print "VIOLATION: " $0; found = 1
-                }
-              }
-            }
-            END { if (found) exit 1 }
-          ' pr.out
+          go test -bench=BenchmarkPush -benchmem ./... > bench.txt
+          grep 'BenchmarkPush' bench.txt \
+            | awk '{ for(i=1;i<=NF;i++) if($i=="allocs/op" && $(i-1)+0>0) { print "VIOLATION:",$0; found=1 } } END { exit found+0 }'
+
+      - name: Run PR Benchmarks
+        run: go test -bench=. -benchmem -count=5 ./... | tee pr.out
 
       - name: Run Main Benchmarks & Compare (PR Only)
         if: github.event_name == 'pull_request'

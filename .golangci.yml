@@ -17,8 +17,15 @@ linters:
         main:
           files:
             - $all
+            - "!**/examples/**"
           allow:
             - $gostd   # strictly allow only the Go Standard Library
+        examples:
+          files:
+            - "**/examples/**"
+          allow:
+            - $gostd
+            - github.com/curfew-marathon/tickbatch
     revive:
       rules:
         - name: exported
