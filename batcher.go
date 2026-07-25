@@ -76,6 +76,13 @@ type Config struct {
 	// not complete within this duration, runLoop returns anyway, leaving the flush
 	// goroutine to finish in the background. A zero value disables the timeout
 	// (the default), meaning runLoop blocks until the final flush returns.
+	//
+	// When the timeout fires, the channel returned by Start is closed immediately.
+	// The background flush goroutine may still be writing to the Sink. Callers
+	// must not call Sink.Close until they are certain the goroutine has finished
+	// (for example, by waiting an additional ShutdownTimeout after <-done).
+	// The abandoned flush is reported via [Config.OnFlushError] if set, or via
+	// log.Printf otherwise.
 	ShutdownTimeout time.Duration
 
 	// DeltaEncoding, when true, XORs each flushed payload against the previous
@@ -325,9 +332,17 @@ func (b *Batcher[T]) runLoop(ctx context.Context) {
 					b.drainAndFlush(&prevOffset)
 					close(ch)
 				}()
+				timer := time.NewTimer(b.cfg.ShutdownTimeout)
 				select {
 				case <-ch:
-				case <-time.After(b.cfg.ShutdownTimeout):
+					timer.Stop()
+				case <-timer.C:
+					timeoutErr := fmt.Errorf("tickbatch: shutdown flush did not complete within %v; drain goroutine still running", b.cfg.ShutdownTimeout)
+					if b.cfg.OnFlushError != nil {
+						b.cfg.OnFlushError(timeoutErr)
+					} else {
+						log.Printf("%v", timeoutErr)
+					}
 				}
 			} else {
 				b.drainAndFlush(&prevOffset)

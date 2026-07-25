@@ -4,7 +4,7 @@ import "unsafe"
 
 // XORBytes computes the bitwise XOR of a and b, writing each result byte into dst.
 //
-// All three slices must have equal length: len(dst) >= len(a) and len(b) >= len(a).
+// The length of dst and b must each be at least len(a); extra trailing bytes are ignored.
 // Passing shorter dst or b panics. The hot path reinterprets the backing arrays as
 // []uint64 via unsafe.Slice and processes eight bytes per loop iteration, maximizing
 // CPU throughput on 64-bit word boundaries. A byte-wise tail loop handles the
@@ -13,7 +13,7 @@ import "unsafe"
 //
 // Alignment note: on AArch64, plain LDR/STR instructions tolerate unaligned
 // addresses, so a subslice starting at a non-zero offset does not fault.
-// The length-equality requirement above is the only hard contract callers must satisfy.
+// The minimum-length requirement above is the only hard contract callers must satisfy.
 func XORBytes(dst, a, b []byte) {
 	n := len(a)
 	if n == 0 {

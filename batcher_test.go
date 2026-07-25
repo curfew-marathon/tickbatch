@@ -864,11 +864,13 @@ func TestDrainStopsBeforeOverflow(t *testing.T) {
 }
 
 // TestShutdownFlushTimeout verifies that when ShutdownTimeout is set, runLoop exits
-// within the timeout even when the final Sink.Flush blocks indefinitely.
+// within the timeout even when the final Sink.Flush blocks indefinitely, and that
+// the abandoned flush is reported via OnFlushError.
 func TestShutdownFlushTimeout(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release) // unblock the orphaned flush goroutine after test
 
+	errCh := make(chan error, 1)
 	sink := &hangSink{release: release}
 	b := New[MarketTick](Config{
 		QueueSize:       16,
@@ -877,6 +879,12 @@ func TestShutdownFlushTimeout(t *testing.T) {
 		TickRate:        1, // 1 Hz — tick is 1 s away; cancel fires first
 		Sink:            sink,
 		ShutdownTimeout: 20 * time.Millisecond,
+		OnFlushError: func(err error) {
+			select {
+			case errCh <- err:
+			default:
+			}
+		},
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -889,6 +897,15 @@ func TestShutdownFlushTimeout(t *testing.T) {
 	case <-done:
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("runLoop did not exit within 100ms; ShutdownTimeout not enforced")
+	}
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Error("OnFlushError received nil error; expected a timeout error")
+		}
+	default:
+		t.Error("OnFlushError was not called; abandoned shutdown flush was not reported")
 	}
 }
 
