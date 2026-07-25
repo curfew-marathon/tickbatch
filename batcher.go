@@ -57,12 +57,14 @@ type Config struct {
 //
 // The zero value is not usable; construct via [New].
 type Batcher[T Serializable] struct {
-	byteBuffer []byte
-	ring       *ringbuf[T]
-	cfg        Config
-	sequenceID atomic.Uint32
-	started    atomic.Bool
-	dropped    atomic.Uint64
+	byteBuffer    []byte
+	previousState []byte
+	deltaBuffer   []byte
+	ring          *ringbuf[T]
+	cfg           Config
+	sequenceID    atomic.Uint32
+	started       atomic.Bool
+	dropped       atomic.Uint64
 }
 
 // New allocates and returns a ready-to-use Batcher.
@@ -77,9 +79,11 @@ func New[T Serializable](cfg Config) *Batcher[T] {
 		panic("tickbatch: Config.Backpressure is not a valid BackpressurePolicy")
 	}
 	return &Batcher[T]{
-		ring:       newRingbuf[T](cfg.QueueSize),
-		cfg:        cfg,
-		byteBuffer: make([]byte, cfg.MaxBatchSize),
+		ring:          newRingbuf[T](cfg.QueueSize),
+		cfg:           cfg,
+		byteBuffer:    make([]byte, cfg.MaxBatchSize),
+		previousState: make([]byte, cfg.MaxBatchSize),
+		deltaBuffer:   make([]byte, cfg.MaxBatchSize),
 	}
 }
 
@@ -165,7 +169,9 @@ func (b *Batcher[T]) runLoop(ctx context.Context) {
 			b.byteBuffer[6] = 0
 			b.byteBuffer[7] = 0
 
-			if err := b.cfg.Sink.Flush(b.byteBuffer[:offset]); err != nil && b.cfg.OnFlushError != nil {
+			XORBytes(b.deltaBuffer[:offset], b.byteBuffer[:offset], b.previousState[:offset])
+			copy(b.previousState[:offset], b.byteBuffer[:offset])
+			if err := b.cfg.Sink.Flush(b.deltaBuffer[:offset]); err != nil && b.cfg.OnFlushError != nil {
 				b.cfg.OnFlushError(err)
 			}
 		}

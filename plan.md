@@ -31,16 +31,16 @@ To push Go's performance to the absolute limit, this project aggressively avoids
 
 ## Phase 4: Backpressure & The Stress Test Suite
 **Goal:** Prove the library holds up under extreme load and handles full queues gracefully.
-- [ ] Implement backpressure policies (e.g., if the fixed-size ring buffer is full, drop the oldest `T` to make room for the new one).
-- [ ] Create `perf_test.go` (The Stress Suite).
-- [ ] **Testable Deliverable:** Run the Stress Suite simulating 10,000 pushes per frame at 144Hz. The library must not crash, and the backpressure policy must execute predictably without memory leaks.
+- [x] Implement backpressure policies (e.g., if the fixed-size ring buffer is full, drop the oldest `T` to make room for the new one).
+- [x] Create `perf_test.go` (The Stress Suite).
+- [x] **Testable Deliverable:** Run the Stress Suite simulating 10,000 pushes per frame at 144Hz. The library must not crash, and the backpressure policy must execute predictably without memory leaks.
 
 ## Phase 5: Vectorized Delta Encoding (The Brain)
 **Goal:** Shrink the payload by sending only what changed, utilizing 64-bit chunking for violent speed increases while maintaining memory safety.
-- [ ] Pre-allocate a `previousState []byte` buffer during `New()`.
-- [ ] **Hardware Optimization:** Implement 64-bit Vectorized XORing. Use `unsafe.Slice` to cast the underlying `[]byte` buffer into `[]uint64`, allowing the CPU to process the delta diffs in 8-byte chunks.
-- [ ] **Alignment Safety:** Implement a tail-byte fallback loop. Safely handle the `len % 8` remainder with a standard byte-wise XOR to prevent out-of-bounds panics on structs that do not align perfectly to 8-byte boundaries.
-- [ ] **Testable Deliverable:** A unit test mathematically proving a reduction in payload byte size, alongside benchmarks proving the vectorized XOR outperforms standard byte looping. Explicitly include tests with non-8-byte aligned struct sizes (e.g., 35 bytes) to guarantee the tail-byte fallback executes correctly.
+- [x] Pre-allocate a `previousState []byte` buffer during `New()`.
+- [x] **Hardware Optimization:** Implement 64-bit Vectorized XORing. Use `unsafe.Slice` to cast the underlying `[]byte` buffer into `[]uint64`, allowing the CPU to process the delta diffs in 8-byte chunks.
+- [x] **Alignment Safety:** Implement a tail-byte fallback loop. Safely handle the `len % 8` remainder with a standard byte-wise XOR to prevent out-of-bounds panics on structs that do not align perfectly to 8-byte boundaries.
+- [x] **Testable Deliverable:** A unit test mathematically proving a reduction in payload byte size, alongside benchmarks proving the vectorized XOR outperforms standard byte looping. Explicitly include tests with non-8-byte aligned struct sizes (e.g., 35 bytes) to guarantee the tail-byte fallback executes correctly.
 
 ## Phase 6: Standard UDP Sink & Pluggable Compression
 **Goal:** Ship it over a real network and offer optional, opt-in compression.
