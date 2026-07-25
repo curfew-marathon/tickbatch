@@ -71,8 +71,7 @@ func TestStressTelemetry144Hz(t *testing.T) {
 		Backpressure: DropOldest,
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), duration+500*time.Millisecond)
-	defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
 
 	done := b.Start(ctx)
 

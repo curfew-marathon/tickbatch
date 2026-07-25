@@ -371,6 +371,60 @@ func TestStdoutSinkFlush(t *testing.T) {
 	}
 }
 
+// TestDropOldestEvictsOldestItem verifies the functional correctness of DropOldest
+// eviction: pushing into a full queue must remove the head item and enqueue the
+// new item, leaving all intermediate items intact and in FIFO order.
+func TestDropOldestEvictsOldestItem(t *testing.T) {
+	const size = 4
+	b := New[NinjaDriftTelemetry](Config{
+		QueueSize:    size,
+		MaxBatchSize: headerSize,
+		Backpressure: DropOldest,
+	})
+
+	// Fill the queue with items A (CarID=1) through D (CarID=4).
+	for i := uint32(1); i <= size; i++ {
+		b.Push(NinjaDriftTelemetry{CarID: i})
+	}
+
+	// E (CarID=5) must evict A (CarID=1), the oldest item.
+	b.Push(NinjaDriftTelemetry{CarID: 5})
+
+	// Drain all available items.
+	var got []NinjaDriftTelemetry
+	for {
+		var item NinjaDriftTelemetry
+		if !b.ring.pop(&item) {
+			break
+		}
+		got = append(got, item)
+	}
+
+	if len(got) != size {
+		t.Fatalf("expected %d items after eviction, got %d", size, len(got))
+	}
+
+	// A must be absent, E must be present, and order must be B C D E.
+	want := []uint32{2, 3, 4, 5}
+	for i, item := range got {
+		if item.CarID != want[i] {
+			t.Errorf("slot %d: got CarID=%d, want %d (oldest must be evicted, newest must survive)",
+				i, item.CarID, want[i])
+		}
+	}
+}
+
+// TestNewPanicsOnInvalidBackpressurePolicy verifies that New panics when
+// Config.Backpressure is set to an unrecognized policy value.
+func TestNewPanicsOnInvalidBackpressurePolicy(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("New with invalid BackpressurePolicy did not panic")
+		}
+	}()
+	New[NinjaDriftTelemetry](Config{QueueSize: 16, MaxBatchSize: headerSize, Backpressure: BackpressurePolicy(99)})
+}
+
 // BenchmarkPush is the Phase 1 performance gate.
 // Success criterion: 0 B/op and 0 allocs/op.
 func BenchmarkPush(b *testing.B) {
