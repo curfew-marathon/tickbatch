@@ -3,6 +3,7 @@ package tickbatch
 import (
 	"context"
 	"fmt"
+	"log"
 	"math"
 	"sync/atomic"
 	"time"
@@ -194,19 +195,28 @@ func (b *Batcher[T]) drainAndFlush(prevOffset *int) {
 			if cerr != nil {
 				if b.cfg.OnFlushError != nil {
 					b.cfg.OnFlushError(cerr)
+				} else {
+					log.Printf("tickbatch: %v", cerr)
 				}
 				return
 			}
 			if cn < 0 || cn > len(b.compressBuffer) {
+				oobErr := fmt.Errorf("tickbatch: compressor returned out-of-range n=%d", cn)
 				if b.cfg.OnFlushError != nil {
-					b.cfg.OnFlushError(fmt.Errorf("tickbatch: compressor returned out-of-range n=%d", cn))
+					b.cfg.OnFlushError(oobErr)
+				} else {
+					log.Printf("tickbatch: %v", oobErr)
 				}
 				return
 			}
 			payload = b.compressBuffer[:cn]
 		}
-		if err := b.cfg.Sink.Flush(payload); err != nil && b.cfg.OnFlushError != nil {
-			b.cfg.OnFlushError(err)
+		if err := b.cfg.Sink.Flush(payload); err != nil {
+			if b.cfg.OnFlushError != nil {
+				b.cfg.OnFlushError(err)
+			} else {
+				log.Printf("tickbatch: %v", err)
+			}
 		}
 		return
 	}
@@ -218,20 +228,29 @@ func (b *Batcher[T]) drainAndFlush(prevOffset *int) {
 		if cerr != nil {
 			if b.cfg.OnFlushError != nil {
 				b.cfg.OnFlushError(cerr)
+			} else {
+				log.Printf("tickbatch: %v", cerr)
 			}
 			return
 		}
 		if cn < 0 || cn > len(b.compressBuffer) {
+			oobErr := fmt.Errorf("tickbatch: compressor returned out-of-range n=%d", cn)
 			if b.cfg.OnFlushError != nil {
-				b.cfg.OnFlushError(fmt.Errorf("tickbatch: compressor returned out-of-range n=%d", cn))
+				b.cfg.OnFlushError(oobErr)
+			} else {
+				log.Printf("tickbatch: %v", oobErr)
 			}
 			return
 		}
 		payload = b.compressBuffer[:cn]
 	}
-	if err := b.cfg.Sink.Flush(payload); err != nil && b.cfg.OnFlushError != nil {
-		b.cfg.OnFlushError(err)
-	} else if err == nil {
+	if err := b.cfg.Sink.Flush(payload); err != nil {
+		if b.cfg.OnFlushError != nil {
+			b.cfg.OnFlushError(err)
+		} else {
+			log.Printf("tickbatch: %v", err)
+		}
+	} else {
 		copy(b.previousState[:offset], b.byteBuffer[:offset])
 		if *prevOffset > offset {
 			clear(b.previousState[offset:*prevOffset])

@@ -1,6 +1,6 @@
 # tickbatch
 
-### The zero-allocation, lock-free telemetry & compliance exhaust pipe for Go.
+## The zero-allocation, lock-free telemetry & compliance exhaust pipe for Go.
 
 Feed it a firehose of risk events, audit records, or market data telemetry. It absorbs everything lock-free into a pre-allocated ring buffer and drains to your transport at a rock-steady Hz — without ever touching the heap, blocking the producer, or coupling your hot thread to downstream I/O.
 
@@ -124,6 +124,7 @@ import (
     "context"
     "fmt"
     "time"
+    "unsafe"
 
     "github.com/curfew-marathon/tickbatch"
 )
@@ -144,11 +145,11 @@ type RiskSnapshot struct {
 // via a direct unsafe memory copy: no reflection, no encoding/binary,
 // no allocations. Returns the number of bytes written.
 func (r RiskSnapshot) Marshal(buf []byte) int {
-    const size = 28 // unsafe.Sizeof(RiskSnapshot{})
+    const size = int(unsafe.Sizeof(RiskSnapshot{}))
     if len(buf) < size {
         return 0
     }
-    _ = buf[:size]
+    copy(buf[:size], (*[size]byte)(unsafe.Pointer(&r))[:])
     return size
 }
 

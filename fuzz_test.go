@@ -79,16 +79,14 @@ func FuzzTickSerialization(f *testing.F) {
 			t.Fatalf("Marshal returned %d bytes, want %d", n, size)
 		}
 
-		got := *(*OrderUpdate)(unsafe.Pointer(&buf[0]))
-
-		// Re-marshal and compare byte-for-byte to handle NaN float values
-		// whose bit patterns are preserved by the unsafe copy even though
-		// NaN != NaN under IEEE 754 comparison.
-		buf2 := make([]byte, size)
-		got.Marshal(buf2)
+		// Compare buf directly against the raw memory layout of input.
+		// This catches deterministic-but-wrong Marshal implementations that a
+		// round-trip comparison (marshal → unmarshal → re-marshal) would miss.
+		// Byte-level comparison preserves NaN bit-pattern safety.
+		expected := (*[size]byte)(unsafe.Pointer(&input))[:]
 		for i := 0; i < size; i++ {
-			if buf[i] != buf2[i] {
-				t.Fatalf("round-trip mismatch at byte %d: got %02x, want %02x", i, buf2[i], buf[i])
+			if buf[i] != expected[i] {
+				t.Fatalf("Marshal byte %d: got %02x, want %02x", i, buf[i], expected[i])
 			}
 		}
 	})

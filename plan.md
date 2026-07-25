@@ -53,7 +53,7 @@ To push Go's performance to the absolute limit, this project aggressively avoids
 - [x] **The Fuzzer (`unsafe` Guard):** Implement Go native fuzzing (`go test -fuzz`) targeting the Phase 3 byte-packing and Phase 5 Vectorized XOR engines. 
 - [x] **Alignment & Boundary Verification:** Ensure the fuzzer injects randomized, non-standard byte slice lengths (e.g., 37 bytes) to mathematically prove the tail-byte fallback logic cannot segfault or panic under chaotic conditions.
 - [x] **The Chaos Sink (Stall Protection):** Implement a `BlockingMockSink` that intentionally sleeps or hangs during the `Flush()` call. 
-- [x] **Non-Blocking Verification:** Write a test proving that a stalled network sink processing NINJA DRIFT telemetry will not lock up the `runLoop`, ensuring the batcher continues to drain the queue and apply backpressure policies without freezing the main thread.
+- [x] **Non-Blocking Verification:** Write a test proving that a stalled downstream Sink will not lock up the `runLoop`, ensuring the batcher continues to drain the queue and apply backpressure policies without freezing the main thread.
 - [x] **Graceful Shutdown:** Implement a context-cancellation test (`ctx.Done()`) that proves the `runLoop` stops accepting new pushes, flushes the final remaining items in the queue to the sink, and exits cleanly without leaking goroutines or dropping the final batch.
 - [x] **Testable Deliverable:** The library must survive a 5-minute fuzzing gauntlet and a simulated network outage chaos test while maintaining 0 allocations and 0 memory leaks.
 
