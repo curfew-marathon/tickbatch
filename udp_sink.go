@@ -26,7 +26,7 @@ func NewUDPSink(addr string) (*UDPSink, error) {
 }
 
 // Flush transmits payload as a single UDP datagram and returns any write error.
-// The payload slice must not be retained by the caller after Flush returns.
+// Flush must not retain payload beyond the duration of the call.
 func (u *UDPSink) Flush(payload []byte) error {
 	_, err := u.conn.Write(payload)
 	return err

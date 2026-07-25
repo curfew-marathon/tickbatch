@@ -72,6 +72,7 @@ func TestUDPSinkIntegration(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	done := b.Start(ctx)
 
 	if err := listener.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {

@@ -2,6 +2,7 @@ package tickbatch
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"sync/atomic"
 	"time"
@@ -204,6 +205,12 @@ func (b *Batcher[T]) runLoop(ctx context.Context) {
 						}
 						continue
 					}
+					if n < 0 || n > len(b.compressBuffer) {
+						if b.cfg.OnFlushError != nil {
+							b.cfg.OnFlushError(fmt.Errorf("tickbatch: compressor returned out-of-range n=%d", n))
+						}
+						continue
+					}
 					payload = b.compressBuffer[:n]
 				}
 				if err := b.cfg.Sink.Flush(payload); err != nil && b.cfg.OnFlushError != nil {
@@ -219,6 +226,12 @@ func (b *Batcher[T]) runLoop(ctx context.Context) {
 				if cerr != nil {
 					if b.cfg.OnFlushError != nil {
 						b.cfg.OnFlushError(cerr)
+					}
+					continue
+				}
+				if n < 0 || n > len(b.compressBuffer) {
+					if b.cfg.OnFlushError != nil {
+						b.cfg.OnFlushError(fmt.Errorf("tickbatch: compressor returned out-of-range n=%d", n))
 					}
 					continue
 				}
