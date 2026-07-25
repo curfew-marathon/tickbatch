@@ -12,6 +12,19 @@ import (
 // little-endian), [6:8] reserved and zeroed.
 const headerSize = 8
 
+// BackpressurePolicy controls what happens when [Batcher.Push] is called on a full ring buffer.
+type BackpressurePolicy int
+
+const (
+	// DropNewest silently discards the incoming item when the ring buffer is full.
+	// Already-queued items are preserved unchanged. This is the default policy.
+	DropNewest BackpressurePolicy = iota
+
+	// DropOldest evicts the oldest queued item to make room for the incoming one.
+	// It performs a lock-free CAS on the consumer head and never blocks or allocates.
+	DropOldest
+)
+
 // Config holds construction parameters for a [Batcher].
 type Config struct {
 	// Sink is the transport that receives each flushed payload.
@@ -34,6 +47,10 @@ type Config struct {
 	// A value of 60 causes the engine to wake and flush the queue 60 times per second.
 	// It must be positive when [Batcher.Start] is called.
 	TickRate int
+
+	// Backpressure selects the policy applied when Push is called on a full queue.
+	// The zero value is [DropNewest].
+	Backpressure BackpressurePolicy
 }
 
 // Batcher is a generic, lock-free telemetry batching engine.
@@ -64,10 +81,10 @@ func New[T Serializable](cfg Config) *Batcher[T] {
 // Push enqueues item into the ring buffer.
 //
 // This is the hot-path method. It is non-blocking and performs zero heap
-// allocations. If the buffer is full, item is silently dropped — the caller
-// is never stalled or panicked (graceful degradation contract).
+// allocations. If the buffer is full, the configured [BackpressurePolicy] is
+// applied — the caller is never stalled or panicked (graceful degradation contract).
 func (b *Batcher[T]) Push(item T) {
-	b.ring.push(item)
+	b.ring.push(item, b.cfg.Backpressure)
 }
 
 // Start launches the tick engine in a background goroutine and returns a channel
