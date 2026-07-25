@@ -8,40 +8,40 @@ import (
 	"unsafe"
 )
 
-// NinjaDriftTelemetry is a flat, pointer-free struct simulating physics telemetry
-// from a high-speed racing game. All fields are 4 bytes, giving a packed wire
-// size of exactly 24 bytes with no trailing padding.
-type NinjaDriftTelemetry struct {
-	// CarID uniquely identifies the vehicle sending this frame.
-	CarID uint32
-	// PosX is the world-space X coordinate in meters.
-	PosX float32
-	// PosY is the world-space Y coordinate in meters.
-	PosY float32
-	// PosZ is the world-space Z coordinate in meters.
-	PosZ float32
-	// RPM is the current engine speed in revolutions per minute.
-	RPM uint32
-	// Velocity is the scalar speed of the vehicle in km/h.
-	Velocity float32
+// OrderUpdate is a flat, pointer-free struct representing an HFT order lifecycle
+// event. All fields are 4 bytes, giving a packed wire size of exactly 24 bytes
+// with no trailing padding.
+type OrderUpdate struct {
+	// OrderID uniquely identifies the order within the matching engine.
+	OrderID uint32
+	// Price is the limit price of the order in floating-point units.
+	Price float32
+	// Quantity is the number of lots requested.
+	Quantity float32
+	// Side encodes the order direction: 1.0 for buy, -1.0 for sell.
+	Side float32
+	// Timestamp is the exchange-assigned nanosecond epoch of the event.
+	Timestamp uint32
+	// Checksum is a lightweight integrity field over the order fields.
+	Checksum float32
 }
 
 // Marshal implements [Serializable] by copying the struct into buf via an unsafe
 // pointer cast, bypassing encoding/binary for zero-overhead serialization.
-func (n NinjaDriftTelemetry) Marshal(buf []byte) int {
-	const size = int(unsafe.Sizeof(NinjaDriftTelemetry{}))
+func (o OrderUpdate) Marshal(buf []byte) int {
+	const size = int(unsafe.Sizeof(OrderUpdate{}))
 	if len(buf) < size {
 		return 0
 	}
-	copy(buf[:size], (*[size]byte)(unsafe.Pointer(&n))[:])
+	copy(buf[:size], (*[size]byte)(unsafe.Pointer(&o))[:])
 	return size
 }
 
-// TestStressTelemetry144Hz simulates a 144 Hz game loop for 3 seconds, pushing
-// 10,000 NinjaDriftTelemetry frames per tick from a pool of concurrent workers.
-// It proves that the engine does not panic, the drain loop exits cleanly, and
-// the DropOldest backpressure policy handles burst overflow without memory leaks
-// or data races.
+// TestStressTelemetry144Hz simulates a high-frequency trading engine loop for 3
+// seconds, pushing 10,000 OrderUpdate records per tick from a pool of concurrent
+// workers. It proves that the engine does not panic, the drain loop exits cleanly,
+// and the DropOldest backpressure policy handles burst overflow without memory
+// leaks or data races.
 func TestStressTelemetry144Hz(t *testing.T) {
 	const (
 		hz             = 144
@@ -50,20 +50,20 @@ func TestStressTelemetry144Hz(t *testing.T) {
 		pushesPerFrame = 10_000
 		numWorkers     = 16
 		queueSize      = 1 << 13 // 8192 slots
-		itemSize       = int(unsafe.Sizeof(NinjaDriftTelemetry{}))
+		itemSize       = int(unsafe.Sizeof(OrderUpdate{}))
 	)
 
-	item := NinjaDriftTelemetry{
-		CarID:    7,
-		PosX:     512.25,
-		PosY:     0.0,
-		PosZ:     -128.75,
-		RPM:      9500,
-		Velocity: 347.8,
+	item := OrderUpdate{
+		OrderID:   7,
+		Price:     512.25,
+		Quantity:  100.0,
+		Side:      1.0,
+		Timestamp: 1_700_000_000,
+		Checksum:  0.0,
 	}
 
 	sink := &countingSink{}
-	b := New[NinjaDriftTelemetry](Config{
+	b := New[OrderUpdate](Config{
 		QueueSize:    queueSize,
 		MaxBatchSize: headerSize + queueSize*itemSize,
 		TickRate:     hz,
