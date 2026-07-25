@@ -51,13 +51,20 @@ func main() {
 		}
 	}()
 
+	flushErrs := make(chan error, 16)
+
 	b := tickbatch.New[RiskEvent](tickbatch.Config{
-		Sink:          sink,
-		QueueSize:     1 << 14,
-		MaxBatchSize:  1 << 16,
-		TickRate:      60,
-		DeltaEncoding: true,
-		Backpressure:  tickbatch.DropOldest,
+		Sink:         sink,
+		QueueSize:    1 << 14,
+		MaxBatchSize: 1 << 16,
+		TickRate:     60,
+		Backpressure: tickbatch.DropOldest,
+		OnFlushError: func(err error) {
+			select {
+			case flushErrs <- err:
+			default:
+			}
+		},
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -72,6 +79,8 @@ func main() {
 			<-done
 			fmt.Printf("graceful shutdown complete — total dropped: %d\n", b.DroppedCount())
 			return
+		case err := <-flushErrs:
+			log.Printf("tickbatch: flush error: %v", err)
 		default:
 			seq++
 			b.Push(RiskEvent{
