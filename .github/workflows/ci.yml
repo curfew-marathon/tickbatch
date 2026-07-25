@@ -24,9 +24,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
       - name: Run tests with race detector
         run: go test -v -race ./...
 
@@ -36,9 +36,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
       - name: golangci-lint config verify
         run: |
           go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
@@ -49,8 +49,6 @@ jobs:
           version: latest
       - name: govulncheck
         uses: golang/govulncheck-action@v1
-        with:
-          go-version-input: '1.25'
 
   benchmark:
     name: Performance Enforcer
@@ -61,9 +59,9 @@ jobs:
           fetch-depth: 0 # needed to fetch main for PR comparisons
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
 
       - name: Install benchstat
         run: go install golang.org/x/perf/cmd/benchstat@latest
@@ -88,8 +86,10 @@ jobs:
       - name: Run Main Benchmarks & Compare (PR Only)
         if: github.event_name == 'pull_request'
         shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          git checkout ${{ github.base_ref }}
+          git checkout "$BASE_REF"
           go test -bench=. -benchmem -count=5 ./... | tee main.out
           echo "=== Performance Delta (Main vs PR) ==="
           benchstat main.out pr.out
