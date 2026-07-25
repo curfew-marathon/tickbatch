@@ -300,6 +300,27 @@ func TestStartPanicsOnNonPositiveTickRate(t *testing.T) {
 	b.Start(context.Background())
 }
 
+// TestStartPanicsOnDoubleStart verifies that calling Start a second time panics,
+// preventing two drain goroutines from racing on the shared byteBuffer.
+func TestStartPanicsOnDoubleStart(t *testing.T) {
+	b := New[UecarrixTelemetry](Config{
+		QueueSize:    16,
+		MaxBatchSize: headerSize,
+		TickRate:     60,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b.Start(ctx)
+
+	defer func() {
+		if recover() == nil {
+			t.Error("second Start call did not panic")
+		}
+	}()
+	b.Start(ctx)
+}
+
 // TestRunLoopBufferFull verifies graceful degradation when byteBuffer cannot
 // fit all queued items: the drain loop must stop at capacity, drop the
 // overflow item silently, and still deliver the partial batch to the Sink.

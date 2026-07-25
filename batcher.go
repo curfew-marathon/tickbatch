@@ -44,6 +44,7 @@ type Batcher[T Serializable] struct {
 	ring       *ringbuf[T]
 	cfg        Config
 	sequenceID atomic.Uint32
+	started    atomic.Bool
 }
 
 // New allocates and returns a ready-to-use Batcher.
@@ -74,10 +75,13 @@ func (b *Batcher[T]) Push(item T) {
 //
 // The engine runs until ctx is canceled, allowing callers to wait for a clean
 // shutdown by receiving from the returned channel. It panics if Config.TickRate
-// is not positive.
+// is not positive, or if Start has already been called on this Batcher.
 func (b *Batcher[T]) Start(ctx context.Context) <-chan struct{} {
 	if b.cfg.TickRate <= 0 {
 		panic("tickbatch: Config.TickRate must be positive")
+	}
+	if !b.started.CompareAndSwap(false, true) {
+		panic("tickbatch: Start called more than once")
 	}
 	done := make(chan struct{})
 	go func() {
