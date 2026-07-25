@@ -65,7 +65,7 @@ func (c *countingSink) Flush(_ []byte) error {
 // TestPushPop verifies the fundamental FIFO contract: a value pushed must be
 // the exact value returned on the next pop, with no corruption or reordering.
 func TestPushPop(t *testing.T) {
-	b := New[MarketTick](Config{QueueSize: 16, MaxBatchSize: headerSize})
+	b := New[MarketTick](Config{QueueSize: 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12})
 
 	ticks := []MarketTick{
 		{Price: 100.00, Volume: 0, Spread: 0},
@@ -89,7 +89,7 @@ func TestPushPop(t *testing.T) {
 // must silently drop items and never block or panic.
 func TestPushOnFullQueueDrops(t *testing.T) {
 	const size = 4
-	b := New[MarketTick](Config{QueueSize: size, MaxBatchSize: headerSize})
+	b := New[MarketTick](Config{QueueSize: size, MaxBatchSize: headerSize + 12, MaxItemSize: 12})
 
 	filler := MarketTick{Price: 100.0}
 	for i := 0; i < size; i++ {
@@ -129,6 +129,7 @@ func TestRunLoop(t *testing.T) {
 	b := New[QuoteSnapshot](Config{
 		QueueSize:    1 << 10,
 		MaxBatchSize: 4096,
+		MaxItemSize:  16,
 		TickRate:     tickRate,
 		Sink:         sink,
 	})
@@ -208,6 +209,7 @@ func TestTickSerialization(t *testing.T) {
 	b := New[Tick](Config{
 		QueueSize:    16,
 		MaxBatchSize: headerSize + 16*tickSize,
+		MaxItemSize:  tickSize,
 		TickRate:     200,
 		Sink:         sink,
 	})
@@ -275,7 +277,7 @@ func TestNewPanicsOnZeroQueueSize(t *testing.T) {
 			t.Error("New with QueueSize=0 did not panic")
 		}
 	}()
-	New[MarketTick](Config{QueueSize: 0, MaxBatchSize: headerSize})
+	New[MarketTick](Config{QueueSize: 0, MaxBatchSize: headerSize + 12, MaxItemSize: 12})
 }
 
 // TestNewPanicsOnNonPowerOfTwoQueueSize verifies that New panics when QueueSize
@@ -286,7 +288,7 @@ func TestNewPanicsOnNonPowerOfTwoQueueSize(t *testing.T) {
 			t.Error("New with non-power-of-two QueueSize did not panic")
 		}
 	}()
-	New[MarketTick](Config{QueueSize: 3, MaxBatchSize: headerSize})
+	New[MarketTick](Config{QueueSize: 3, MaxBatchSize: headerSize + 12, MaxItemSize: 12})
 }
 
 // TestStartPanicsOnNonPositiveTickRate verifies that Start panics when
@@ -297,7 +299,7 @@ func TestStartPanicsOnNonPositiveTickRate(t *testing.T) {
 			t.Error("Start with TickRate=0 did not panic")
 		}
 	}()
-	b := New[MarketTick](Config{QueueSize: 16, MaxBatchSize: headerSize})
+	b := New[MarketTick](Config{QueueSize: 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12})
 	b.Start(context.Background())
 }
 
@@ -306,7 +308,8 @@ func TestStartPanicsOnNonPositiveTickRate(t *testing.T) {
 func TestStartPanicsOnDoubleStart(t *testing.T) {
 	b := New[MarketTick](Config{
 		QueueSize:    16,
-		MaxBatchSize: headerSize,
+		MaxBatchSize: headerSize + 12,
+		MaxItemSize:  12,
 		TickRate:     60,
 	})
 
@@ -322,17 +325,19 @@ func TestStartPanicsOnDoubleStart(t *testing.T) {
 	b.Start(ctx)
 }
 
-// TestRunLoopBufferFull verifies graceful degradation when byteBuffer cannot
-// fit all queued items: the drain loop must stop at capacity, drop the
-// overflow item silently, and still deliver the partial batch to the Sink.
+// TestRunLoopBufferFull verifies graceful degradation when byteBuffer cannot fit all
+// queued items: the drain loop must stop before dequeuing an item that would overflow
+// the buffer, leaving it queued for the next tick. Both items must be delivered over
+// two successive flushes; neither is silently destroyed.
 func TestRunLoopBufferFull(t *testing.T) {
 	const tickSize = 20 // packed wire size: 8 (Symbol) + 8 (Price) + 4 (Size)
 
-	sink := &captureSink{ch: make(chan []byte, 1)}
+	sink := &multiCaptureSink{ch: make(chan []byte, 4)}
 	b := New[Tick](Config{
 		QueueSize:    16,
-		MaxBatchSize: headerSize + tickSize, // fits exactly one Tick; second is dropped
-		TickRate:     200,
+		MaxBatchSize: headerSize + tickSize, // fits exactly one Tick per flush
+		MaxItemSize:  tickSize,
+		TickRate:     500, // fast tick to collect both flushes quickly
 		Sink:         sink,
 	})
 
@@ -342,25 +347,34 @@ func TestRunLoopBufferFull(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := b.Start(ctx)
 
-	var payload []byte
-	select {
-	case payload = <-sink.ch:
-	case <-time.After(500 * time.Millisecond):
-		cancel()
-		<-done
-		t.Fatal("timed out waiting for Sink.Flush")
+	collect := func(label string) []byte {
+		t.Helper()
+		select {
+		case p := <-sink.ch:
+			return p
+		case <-time.After(500 * time.Millisecond):
+			cancel()
+			<-done
+			t.Fatalf("timed out waiting for %s flush", label)
+			return nil
+		}
 	}
+
+	first := collect("first")
+	second := collect("second")
 
 	cancel()
 	<-done
 
 	wantLen := headerSize + tickSize
-	if len(payload) != wantLen {
-		t.Fatalf("payload length: got %d, want %d", len(payload), wantLen)
-	}
-	count := uint16(payload[4]) | uint16(payload[5])<<8
-	if count != 1 {
-		t.Errorf("item count: got %d, want 1 (overflow item must be silently dropped)", count)
+	for label, payload := range map[string][]byte{"first": first, "second": second} {
+		if len(payload) != wantLen {
+			t.Errorf("%s payload length: got %d, want %d", label, len(payload), wantLen)
+		}
+		count := uint16(payload[4]) | uint16(payload[5])<<8
+		if count != 1 {
+			t.Errorf("%s item count: got %d, want 1", label, count)
+		}
 	}
 }
 
@@ -379,7 +393,8 @@ func TestDropOldestEvictsOldestItem(t *testing.T) {
 	const size = 4
 	b := New[OrderUpdate](Config{
 		QueueSize:    size,
-		MaxBatchSize: headerSize,
+		MaxBatchSize: headerSize + 24,
+		MaxItemSize:  24,
 		Backpressure: DropOldest,
 	})
 
@@ -423,7 +438,7 @@ func TestNewPanicsOnInvalidBackpressurePolicy(t *testing.T) {
 			t.Error("New with invalid BackpressurePolicy did not panic")
 		}
 	}()
-	New[OrderUpdate](Config{QueueSize: 16, MaxBatchSize: headerSize, Backpressure: BackpressurePolicy(99)})
+	New[OrderUpdate](Config{QueueSize: 16, MaxBatchSize: headerSize + 24, MaxItemSize: 24, Backpressure: BackpressurePolicy(99)})
 }
 
 // OrderBookState is a flat, pointer-free struct with a 35-byte wire
@@ -526,6 +541,8 @@ func (m *multiCaptureSink) Flush(payload []byte) error {
 	return nil
 }
 
+func (m *multiCaptureSink) reliable() {}
+
 // TestDeltaEncodingReconstruction verifies the end-to-end delta encoding
 // contract across three successive flushes, including a variable-length case
 // that stresses the stale-byte zeroing path in runLoop.
@@ -543,6 +560,7 @@ func TestDeltaEncodingReconstruction(t *testing.T) {
 	b := New[OrderBookState](Config{
 		QueueSize:     16,
 		MaxBatchSize:  headerSize + maxItems*itemSize,
+		MaxItemSize:   itemSize,
 		TickRate:      500,
 		Sink:          sink,
 		DeltaEncoding: true,
@@ -666,6 +684,7 @@ func TestNonBlockingPushDuringStalledFlush(t *testing.T) {
 	b := New[MarketTick](Config{
 		QueueSize:    1 << 10,
 		MaxBatchSize: 4096,
+		MaxItemSize:  12,
 		TickRate:     200,
 		Sink:         sink,
 	})
@@ -713,6 +732,7 @@ func TestGracefulShutdown(t *testing.T) {
 	b := New[MarketTick](Config{
 		QueueSize:    1 << 10,
 		MaxBatchSize: 4096,
+		MaxItemSize:  12,
 		TickRate:     1, // 1 Hz — first tick is 1 s away, ensuring cancel fires first
 		Sink:         sink,
 	})
@@ -772,7 +792,7 @@ func BenchmarkXORBytesNaive(b *testing.B) {
 // BenchmarkPush is the Phase 1 performance gate.
 // Success criterion: 0 B/op and 0 allocs/op.
 func BenchmarkPush(b *testing.B) {
-	batcher := New[MarketTick](Config{QueueSize: 1 << 16, MaxBatchSize: headerSize})
+	batcher := New[MarketTick](Config{QueueSize: 1 << 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12})
 	item := MarketTick{Price: 415.25, Volume: 200, Spread: 0.01}
 
 	b.ResetTimer()
@@ -785,4 +805,177 @@ func BenchmarkPush(b *testing.B) {
 		var sink MarketTick
 		batcher.ring.pop(&sink)
 	}
+}
+
+// hangSink is a test-only Sink whose Flush blocks until the release channel is closed.
+type hangSink struct{ release chan struct{} }
+
+// Flush blocks until release is closed, simulating a permanently stalled transport.
+func (s *hangSink) Flush([]byte) error { <-s.release; return nil }
+
+// TestDrainStopsBeforeOverflow verifies the C-1 fix: when byteBuffer cannot hold
+// another item the drain loop must break before dequeuing, leaving the item queued
+// for the next tick. Both items must be delivered with no panic and no silent loss.
+func TestDrainStopsBeforeOverflow(t *testing.T) {
+	const tickSize = 20
+
+	sink := &multiCaptureSink{ch: make(chan []byte, 4)}
+	b := New[Tick](Config{
+		QueueSize:    16,
+		MaxBatchSize: headerSize + tickSize,
+		MaxItemSize:  tickSize,
+		TickRate:     500,
+		Sink:         sink,
+	})
+
+	b.Push(Tick{Symbol: [8]byte{'X'}, Price: 10.0, Size: 10})
+	b.Push(Tick{Symbol: [8]byte{'Y'}, Price: 20.0, Size: 20})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := b.Start(ctx)
+
+	collect := func(label string) []byte {
+		t.Helper()
+		select {
+		case p := <-sink.ch:
+			return p
+		case <-time.After(500 * time.Millisecond):
+			cancel()
+			<-done
+			t.Fatalf("timed out waiting for %s flush; item may have been silently lost", label)
+			return nil
+		}
+	}
+
+	first := collect("first")
+	second := collect("second")
+	cancel()
+	<-done
+
+	for label, payload := range map[string][]byte{"first": first, "second": second} {
+		if len(payload) != headerSize+tickSize {
+			t.Errorf("%s: unexpected payload length %d", label, len(payload))
+		}
+		count := uint16(payload[4]) | uint16(payload[5])<<8
+		if count != 1 {
+			t.Errorf("%s: got item count %d, want 1", label, count)
+		}
+	}
+}
+
+// TestShutdownFlushTimeout verifies that when ShutdownTimeout is set, runLoop exits
+// within the timeout even when the final Sink.Flush blocks indefinitely, and that
+// the abandoned flush is reported via OnFlushError.
+func TestShutdownFlushTimeout(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release) // unblock the orphaned flush goroutine after test
+
+	errCh := make(chan error, 1)
+	sink := &hangSink{release: release}
+	b := New[MarketTick](Config{
+		QueueSize:       16,
+		MaxBatchSize:    headerSize + 12,
+		MaxItemSize:     12,
+		TickRate:        1, // 1 Hz — tick is 1 s away; cancel fires first
+		Sink:            sink,
+		ShutdownTimeout: 20 * time.Millisecond,
+		OnFlushError: func(err error) {
+			select {
+			case errCh <- err:
+			default:
+			}
+		},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := b.Start(ctx)
+
+	b.Push(MarketTick{Price: 1.0}) // item ensures the final drain calls Flush
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("runLoop did not exit within 100ms; ShutdownTimeout not enforced")
+	}
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Error("OnFlushError received nil error; expected a timeout error")
+		}
+	default:
+		t.Error("OnFlushError was not called; abandoned shutdown flush was not reported")
+	}
+}
+
+// TestNewPanicsOnDeltaEncodingWithUnreliableSink verifies that New panics when
+// DeltaEncoding is true and the Sink does not implement ReliableSink.
+func TestNewPanicsOnDeltaEncodingWithUnreliableSink(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("New with DeltaEncoding=true and a non-ReliableSink did not panic")
+		}
+	}()
+	New[MarketTick](Config{
+		QueueSize:     16,
+		MaxBatchSize:  headerSize + 12,
+		MaxItemSize:   12,
+		TickRate:      60,
+		Sink:          &countingSink{}, // countingSink does not implement ReliableSink
+		DeltaEncoding: true,
+	})
+}
+
+// TestEvictedCount verifies that DropOldest evictions are reflected in EvictedCount
+// and that DroppedCount remains zero throughout.
+func TestEvictedCount(t *testing.T) {
+	const (
+		size   = 4
+		extras = 3
+	)
+	b := New[OrderUpdate](Config{
+		QueueSize:    size,
+		MaxBatchSize: headerSize + 24,
+		MaxItemSize:  24,
+		Backpressure: DropOldest,
+	})
+
+	for i := uint32(0); i < size; i++ {
+		b.Push(OrderUpdate{OrderID: i})
+	}
+	for i := uint32(0); i < extras; i++ {
+		b.Push(OrderUpdate{OrderID: size + i})
+	}
+
+	if got := b.EvictedCount(); got != extras {
+		t.Errorf("EvictedCount: got %d, want %d", got, extras)
+	}
+	if got := b.DroppedCount(); got != 0 {
+		t.Errorf("DroppedCount: got %d, want 0 (DropOldest must not increment DroppedCount)", got)
+	}
+}
+
+// TestXORBytesShortDstPanics verifies that XORBytes panics when dst is shorter than a.
+func TestXORBytesShortDstPanics(t *testing.T) {
+	a := make([]byte, 8)
+	b := make([]byte, 8)
+
+	t.Run("short dst", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Error("XORBytes with short dst did not panic")
+			}
+		}()
+		XORBytes(make([]byte, 4), a, b)
+	})
+
+	t.Run("short b", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Error("XORBytes with short b did not panic")
+			}
+		}()
+		XORBytes(make([]byte, 8), a, make([]byte, 4))
+	})
 }

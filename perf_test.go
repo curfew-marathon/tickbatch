@@ -66,6 +66,7 @@ func TestStressTelemetry144Hz(t *testing.T) {
 	b := New[OrderUpdate](Config{
 		QueueSize:    queueSize,
 		MaxBatchSize: headerSize + queueSize*itemSize,
+		MaxItemSize:  itemSize,
 		TickRate:     hz,
 		Sink:         sink,
 		Backpressure: DropOldest,

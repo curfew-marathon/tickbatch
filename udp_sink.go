@@ -7,6 +7,11 @@ import "net"
 //
 // Construct via [NewUDPSink]. Call [UDPSink.Close] after the [Batcher] has
 // stopped to release the underlying OS socket.
+//
+// UDPSink intentionally does not implement [ReliableSink] and must not be
+// paired with [Config.DeltaEncoding] = true. A lost datagram advances the
+// sender's XOR baseline while the receiver never sees the frame, producing
+// unrecoverable desync for the entire subsequent stream.
 type UDPSink struct {
 	conn *net.UDPConn
 }

@@ -52,7 +52,15 @@ type Config struct {
 
 	// MaxBatchSize is the maximum size in bytes of a single serialized batch.
 	// The internal byte buffer is pre-allocated to this size during [New].
+	// Must satisfy MaxBatchSize >= headerSize + MaxItemSize.
 	MaxBatchSize int
+
+	// MaxItemSize is the maximum number of bytes that any single item's Marshal
+	// method can write. The drain loop stops before calling popMarshal when the
+	// remaining buffer space is smaller than this value, leaving the item queued
+	// for the next tick instead of dequeuing it into a buffer that cannot hold it.
+	// Must be positive.
+	MaxItemSize int
 
 	// TickRate is the number of drain cycles executed per second.
 	// A value of 60 causes the engine to wake and flush the queue 60 times per second.
@@ -63,11 +71,31 @@ type Config struct {
 	// The zero value is [DropNewest].
 	Backpressure BackpressurePolicy
 
+	// ShutdownTimeout bounds the duration of the final Sink.Flush call that runs
+	// when the context passed to [Batcher.Start] is canceled. If the flush does
+	// not complete within this duration, runLoop returns anyway, leaving the flush
+	// goroutine to finish in the background. A zero value disables the timeout
+	// (the default), meaning runLoop blocks until the final flush returns.
+	//
+	// When the timeout fires, the channel returned by Start is closed immediately.
+	// The background flush goroutine may still be writing to the Sink. Callers
+	// must not call Sink.Close until they are certain the goroutine has finished
+	// (for example, by waiting an additional ShutdownTimeout after <-done).
+	// The abandoned flush is reported via [Config.OnFlushError] if set, or via
+	// log.Printf otherwise.
+	ShutdownTimeout time.Duration
+
 	// DeltaEncoding, when true, XORs each flushed payload against the previous
 	// frame before passing it to Sink.Flush. Receivers must XOR with their own
 	// copy of the prior frame to reconstruct the original batch. When false
 	// (the default), Sink.Flush receives the fully-serialized raw payload,
 	// preserving the original Sink contract.
+	//
+	// DeltaEncoding is semantically unsafe over fire-and-forget transports such
+	// as [UDPSink]. A lost datagram advances the sender's delta baseline while the
+	// receiver never processes that frame; every subsequent XOR produces permanently
+	// corrupt output. Sink must implement [ReliableSink] when DeltaEncoding is true;
+	// [New] panics otherwise.
 	DeltaEncoding bool
 }
 
@@ -96,6 +124,17 @@ func New[T Serializable](cfg Config) *Batcher[T] {
 	}
 	if cfg.Backpressure != DropNewest && cfg.Backpressure != DropOldest {
 		panic("tickbatch: Config.Backpressure is not a valid BackpressurePolicy")
+	}
+	if cfg.MaxItemSize <= 0 {
+		panic("tickbatch: Config.MaxItemSize must be positive")
+	}
+	if cfg.MaxBatchSize < headerSize+cfg.MaxItemSize {
+		panic("tickbatch: Config.MaxBatchSize must be >= headerSize + MaxItemSize")
+	}
+	if cfg.DeltaEncoding && cfg.Sink != nil {
+		if _, ok := cfg.Sink.(ReliableSink); !ok {
+			panic("tickbatch: DeltaEncoding requires a ReliableSink; UDPSink and other fire-and-forget sinks are incompatible")
+		}
 	}
 	b := &Batcher[T]{
 		ring:       newRingbuf[T](cfg.QueueSize),
@@ -133,12 +172,24 @@ func (b *Batcher[T]) DroppedCount() uint64 {
 	return b.dropped.Load()
 }
 
+// EvictedCount returns the cumulative number of items forcibly evicted from the
+// head of the ring buffer under the [DropOldest] backpressure policy. It is always
+// zero when using [DropNewest]. Use DroppedCount() + EvictedCount() to observe
+// total data loss across both policies.
+func (b *Batcher[T]) EvictedCount() uint64 {
+	return b.ring.evicted.Load()
+}
+
 // Start launches the tick engine in a background goroutine and returns a channel
 // that is closed once the goroutine has fully exited.
 //
 // The engine runs until ctx is canceled, allowing callers to wait for a clean
 // shutdown by receiving from the returned channel. It panics if Config.TickRate
 // is not positive, or if Start has already been called on this Batcher.
+//
+// Callers must halt all producers before canceling the context. Any [Batcher.Push]
+// call that races with the final drain after cancellation may be silently lost;
+// quiescing producers is the caller's responsibility.
 func (b *Batcher[T]) Start(ctx context.Context) <-chan struct{} {
 	if b.cfg.TickRate <= 0 {
 		panic("tickbatch: Config.TickRate must be positive")
@@ -163,6 +214,9 @@ func (b *Batcher[T]) drainAndFlush(prevOffset *int) {
 	offset := headerSize
 	n := 0
 	for n < math.MaxUint16 {
+		if len(b.byteBuffer)-offset < b.cfg.MaxItemSize {
+			break
+		}
 		written, ok := b.ring.popMarshal(b.byteBuffer[offset:])
 		if !ok {
 			break
@@ -272,7 +326,27 @@ func (b *Batcher[T]) runLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			b.drainAndFlush(&prevOffset)
+			if b.cfg.ShutdownTimeout > 0 {
+				ch := make(chan struct{})
+				go func() {
+					b.drainAndFlush(&prevOffset)
+					close(ch)
+				}()
+				timer := time.NewTimer(b.cfg.ShutdownTimeout)
+				select {
+				case <-ch:
+					timer.Stop()
+				case <-timer.C:
+					timeoutErr := fmt.Errorf("tickbatch: shutdown flush did not complete within %v; drain goroutine still running", b.cfg.ShutdownTimeout)
+					if b.cfg.OnFlushError != nil {
+						b.cfg.OnFlushError(timeoutErr)
+					} else {
+						log.Printf("%v", timeoutErr)
+					}
+				}
+			} else {
+				b.drainAndFlush(&prevOffset)
+			}
 			return
 		case <-ticker.C:
 			b.drainAndFlush(&prevOffset)

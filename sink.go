@@ -13,6 +13,17 @@ type Sink interface {
 	Flush(payload []byte) error
 }
 
+// ReliableSink is an optional marker interface that a Sink may implement to declare
+// at-least-once delivery semantics: a nil error from Flush guarantees the payload
+// was accepted by the downstream transport for delivery. Sinks that do not implement this
+// interface (such as [UDPSink], which is fire-and-forget) must not be paired with
+// [Config.DeltaEncoding] = true, because a lost datagram advances the sender's
+// delta baseline while the receiver never sees the frame, causing permanent desync.
+type ReliableSink interface {
+	Sink
+	reliable()
+}
+
 // StdoutSink is a diagnostic Sink that prints batch metadata to standard output.
 //
 // It is intended for development and testing only and must not be used in
@@ -24,3 +35,5 @@ func (s StdoutSink) Flush(payload []byte) error {
 	fmt.Printf("StdoutSink: flushed batch of %d bytes\n", len(payload))
 	return nil
 }
+
+func (StdoutSink) reliable() {}
