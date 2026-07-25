@@ -44,9 +44,9 @@ To push Go's performance to the absolute limit, this project aggressively avoids
 
 ## Phase 6: Standard UDP Sink & Pluggable Compression
 **Goal:** Ship it over a real network and offer optional, opt-in compression.
-- [ ] Implement `UDPSink` using the standard `net` package (fire-and-forget).
-- [ ] Define a `Compressor` interface so users can optionally wrap their sinks in a library like `klauspost/compress/zstd`.
-- [ ] **Testable Deliverable:** Two local UDP scripts (a sender using `tickbatch` and a vanilla Go UDP listener) successfully syncing a stream of structs in real-time.
+- [x] Implement `UDPSink` using the standard `net` package (fire-and-forget).
+- [x] Define a `Compressor` interface so users can optionally wrap their sinks in a library like `klauspost/compress/zstd`.
+- [x] **Testable Deliverable:** Two local UDP scripts (a sender using `tickbatch` and a vanilla Go UDP listener) successfully syncing a stream of structs in real-time.
 
 ## Phase 7: Fuzzing, Chaos & Reliability
 **Goal:** Defend the zero-allocation hot path and memory safety against malicious payloads, awkward memory boundaries, and downstream network failures.
