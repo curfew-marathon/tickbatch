@@ -1,0 +1,84 @@
+// Package main demonstrates tickbatch as a zero-impact telemetry exhaust.
+// It pushes RiskEvent structs as fast as possible for 3 seconds, then
+// blocks until the engine flushes its final batch and exits cleanly.
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"time"
+	"unsafe"
+
+	tickbatch "github.com/curfew-marathon/tickbatch"
+)
+
+// riskEventSize is the encoded byte size of one RiskEvent.
+const riskEventSize = int(unsafe.Sizeof(RiskEvent{}))
+
+// RiskEvent is a flat, pointer-free risk metric snapshot for a single instrument.
+// The trailing [6]byte pad aligns the struct to a multiple of 8 bytes so the
+// vectorized XOR engine processes every field in the fast 64-bit path.
+type RiskEvent struct {
+	InstrumentID uint32
+	SequenceNum  uint32
+	Price        float64
+	Delta        float64
+	Gamma        float64
+	Timestamp    int64
+	Flags        uint16
+	_            [6]byte
+}
+
+// Marshal writes e into buf via a direct unsafe memory copy and returns riskEventSize,
+// or 0 if buf is too small to hold the struct.
+func (e RiskEvent) Marshal(buf []byte) int {
+	if len(buf) < riskEventSize {
+		return 0
+	}
+	*(*RiskEvent)(unsafe.Pointer(&buf[0])) = e
+	return riskEventSize
+}
+
+func main() {
+	sink, err := tickbatch.NewUDPSink("127.0.0.1:9999")
+	if err != nil {
+		log.Fatalf("tickbatch: dial udp: %v", err)
+	}
+	defer sink.Close()
+
+	b := tickbatch.New[RiskEvent](tickbatch.Config{
+		Sink:          sink,
+		QueueSize:     1 << 14,
+		MaxBatchSize:  1 << 16,
+		TickRate:      60,
+		DeltaEncoding: true,
+		Backpressure:  tickbatch.DropOldest,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	done := b.Start(ctx)
+
+	var seq uint32
+	for {
+		select {
+		case <-ctx.Done():
+			<-done
+			fmt.Printf("graceful shutdown complete — total dropped: %d\n", b.DroppedCount())
+			return
+		default:
+			seq++
+			b.Push(RiskEvent{
+				InstrumentID: seq % 8,
+				SequenceNum:  seq,
+				Price:        100.0 + float64(seq%100)*0.01,
+				Delta:        0.45,
+				Gamma:        0.02,
+				Timestamp:    time.Now().UnixNano(),
+				Flags:        0x01,
+			})
+		}
+	}
+}
