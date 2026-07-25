@@ -51,18 +51,27 @@ type Config struct {
 	// Backpressure selects the policy applied when Push is called on a full queue.
 	// The zero value is [DropNewest].
 	Backpressure BackpressurePolicy
+
+	// DeltaEncoding, when true, XORs each flushed payload against the previous
+	// frame before passing it to Sink.Flush. Receivers must XOR with their own
+	// copy of the prior frame to reconstruct the original batch. When false
+	// (the default), Sink.Flush receives the fully-serialized raw payload,
+	// preserving the original Sink contract.
+	DeltaEncoding bool
 }
 
 // Batcher is a generic, lock-free telemetry batching engine.
 //
 // The zero value is not usable; construct via [New].
 type Batcher[T Serializable] struct {
-	byteBuffer []byte
-	ring       *ringbuf[T]
-	cfg        Config
-	sequenceID atomic.Uint32
-	started    atomic.Bool
-	dropped    atomic.Uint64
+	byteBuffer    []byte
+	previousState []byte
+	deltaBuffer   []byte
+	ring          *ringbuf[T]
+	cfg           Config
+	sequenceID    atomic.Uint32
+	started       atomic.Bool
+	dropped       atomic.Uint64
 }
 
 // New allocates and returns a ready-to-use Batcher.
@@ -76,11 +85,16 @@ func New[T Serializable](cfg Config) *Batcher[T] {
 	if cfg.Backpressure != DropNewest && cfg.Backpressure != DropOldest {
 		panic("tickbatch: Config.Backpressure is not a valid BackpressurePolicy")
 	}
-	return &Batcher[T]{
+	b := &Batcher[T]{
 		ring:       newRingbuf[T](cfg.QueueSize),
 		cfg:        cfg,
 		byteBuffer: make([]byte, cfg.MaxBatchSize),
 	}
+	if cfg.DeltaEncoding {
+		b.previousState = make([]byte, cfg.MaxBatchSize)
+		b.deltaBuffer = make([]byte, cfg.MaxBatchSize)
+	}
+	return b
 }
 
 // Push enqueues item into the ring buffer.
@@ -132,6 +146,8 @@ func (b *Batcher[T]) runLoop(ctx context.Context) {
 	ticker := time.NewTicker(time.Second / time.Duration(b.cfg.TickRate))
 	defer ticker.Stop()
 
+	var prevOffset int
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -165,8 +181,22 @@ func (b *Batcher[T]) runLoop(ctx context.Context) {
 			b.byteBuffer[6] = 0
 			b.byteBuffer[7] = 0
 
-			if err := b.cfg.Sink.Flush(b.byteBuffer[:offset]); err != nil && b.cfg.OnFlushError != nil {
+			if !b.cfg.DeltaEncoding {
+				if err := b.cfg.Sink.Flush(b.byteBuffer[:offset]); err != nil && b.cfg.OnFlushError != nil {
+					b.cfg.OnFlushError(err)
+				}
+				continue
+			}
+
+			XORBytes(b.deltaBuffer[:offset], b.byteBuffer[:offset], b.previousState[:offset])
+			if err := b.cfg.Sink.Flush(b.deltaBuffer[:offset]); err != nil && b.cfg.OnFlushError != nil {
 				b.cfg.OnFlushError(err)
+			} else if err == nil {
+				copy(b.previousState[:offset], b.byteBuffer[:offset])
+				if prevOffset > offset {
+					clear(b.previousState[offset:prevOffset])
+				}
+				prevOffset = offset
 			}
 		}
 	}

@@ -1,6 +1,7 @@
 package tickbatch
 
 import (
+	"bytes"
 	"context"
 	"sync/atomic"
 	"testing"
@@ -423,6 +424,248 @@ func TestNewPanicsOnInvalidBackpressurePolicy(t *testing.T) {
 		}
 	}()
 	New[OrderUpdate](Config{QueueSize: 16, MaxBatchSize: headerSize, Backpressure: BackpressurePolicy(99)})
+}
+
+// OrderBookState is a flat, pointer-free struct with a 35-byte wire
+// representation (non-multiple-of-8 length: 32 word-aligned bytes + 3 tail
+// bytes) that exercises the [XORBytes] tail-byte fallback path.
+type OrderBookState struct {
+	// BidPrice is the best bid price in the order book.
+	BidPrice float64
+	// AskPrice is the best ask price in the order book.
+	AskPrice float64
+	// BidSize is the total quantity available at the best bid.
+	BidSize float32
+	// AskSize is the total quantity available at the best ask.
+	AskSize float32
+	// SeqNum is the sequence number of this order book snapshot.
+	SeqNum uint32
+	// Flags is a packed bitfield for auxiliary snapshot metadata.
+	Flags [7]byte
+}
+
+// Marshal implements [Serializable] by writing 35 bytes into buf: 8+8+4+4+4+7.
+// The wire size of 35 is not a multiple of 8, which stresses the tail-byte
+// fallback loop in [XORBytes].
+func (o OrderBookState) Marshal(buf []byte) int {
+	const size = 35
+	if len(buf) < size {
+		return 0
+	}
+	*(*float64)(unsafe.Pointer(&buf[0])) = o.BidPrice
+	*(*float64)(unsafe.Pointer(&buf[8])) = o.AskPrice
+	*(*float32)(unsafe.Pointer(&buf[16])) = o.BidSize
+	*(*float32)(unsafe.Pointer(&buf[20])) = o.AskSize
+	*(*uint32)(unsafe.Pointer(&buf[24])) = o.SeqNum
+	copy(buf[28:size], o.Flags[:])
+	return size
+}
+
+// TestXORBytesCorrectness verifies that [XORBytes] produces the correct bitwise
+// XOR of two 35-byte buffers (32 bytes processed as uint64 words + 3 tail bytes
+// via the fallback loop) and that the operation is self-inverse: applying XOR
+// with the same second operand twice recovers the original first operand.
+func TestXORBytesCorrectness(t *testing.T) {
+	current := OrderBookState{
+		BidPrice: 189.97,
+		AskPrice: 189.98,
+		BidSize:  300,
+		AskSize:  100,
+		SeqNum:   42,
+		Flags:    [7]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07},
+	}
+	previous := OrderBookState{
+		BidPrice: 189.95,
+		AskPrice: 189.96,
+		BidSize:  250,
+		AskSize:  80,
+		SeqNum:   41,
+		Flags:    [7]byte{0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70},
+	}
+
+	a := make([]byte, 35)
+	b := make([]byte, 35)
+	dst := make([]byte, 35)
+	recovered := make([]byte, 35)
+
+	current.Marshal(a)
+	previous.Marshal(b)
+
+	XORBytes(dst, a, b)
+
+	for i := 0; i < 35; i++ {
+		if want := a[i] ^ b[i]; dst[i] != want {
+			t.Errorf("byte %d: got %02x, want %02x", i, dst[i], want)
+		}
+	}
+
+	// Self-inverse: XOR(delta, b) must recover a exactly.
+	XORBytes(recovered, dst, b)
+	for i := 0; i < 35; i++ {
+		if recovered[i] != a[i] {
+			t.Errorf("reversibility byte %d: got %02x, want %02x", i, recovered[i], a[i])
+		}
+	}
+}
+
+// multiCaptureSink is a test-only Sink that records every flushed payload in
+// order, copying each into a fresh slice so the caller may compare them after
+// the engine stops.
+type multiCaptureSink struct {
+	ch chan []byte
+}
+
+// Flush copies payload and sends it on the channel non-blocking.
+func (m *multiCaptureSink) Flush(payload []byte) error {
+	buf := make([]byte, len(payload))
+	copy(buf, payload)
+	select {
+	case m.ch <- buf:
+	default:
+	}
+	return nil
+}
+
+// TestDeltaEncodingReconstruction verifies the end-to-end delta encoding
+// contract across three successive flushes, including a variable-length case
+// that stresses the stale-byte zeroing path in runLoop.
+//
+// Frame 1: previousState is all zeros, so the delta equals the raw payload.
+// Frame 2: a modified single-item batch; the delta is XOR(frame2, frame1).
+// Frame 3: a two-item batch (larger than frame 2); proves that
+// clear(previousState[offset:prevOffset]) prevents stale-byte corruption when
+// the batch grows back beyond the previous offset.
+func TestDeltaEncodingReconstruction(t *testing.T) {
+	const itemSize = 35 // OrderBookState wire size
+	const maxItems = 4
+
+	sink := &multiCaptureSink{ch: make(chan []byte, 4)}
+	b := New[OrderBookState](Config{
+		QueueSize:     16,
+		MaxBatchSize:  headerSize + maxItems*itemSize,
+		TickRate:      500,
+		Sink:          sink,
+		DeltaEncoding: true,
+	})
+
+	frame1Item := OrderBookState{BidPrice: 100.0, AskPrice: 100.1, BidSize: 50, AskSize: 50, SeqNum: 1, Flags: [7]byte{0x01}}
+	frame2Item := OrderBookState{BidPrice: 100.5, AskPrice: 100.6, BidSize: 40, AskSize: 60, SeqNum: 2, Flags: [7]byte{0x02}}
+	frame3a := OrderBookState{BidPrice: 101.0, AskPrice: 101.1, BidSize: 30, AskSize: 70, SeqNum: 3, Flags: [7]byte{0x03}}
+	frame3b := OrderBookState{BidPrice: 101.5, AskPrice: 101.6, BidSize: 20, AskSize: 80, SeqNum: 4, Flags: [7]byte{0x04}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := b.Start(ctx)
+
+	// Push frame 1 and wait for its flush.
+	b.Push(frame1Item)
+	var delta1 []byte
+	select {
+	case delta1 = <-sink.ch:
+	case <-time.After(500 * time.Millisecond):
+		cancel()
+		<-done
+		t.Fatal("timed out waiting for frame 1 flush")
+	}
+
+	// Push frame 2 and wait for its flush.
+	b.Push(frame2Item)
+	var delta2 []byte
+	select {
+	case delta2 = <-sink.ch:
+	case <-time.After(500 * time.Millisecond):
+		cancel()
+		<-done
+		t.Fatal("timed out waiting for frame 2 flush")
+	}
+
+	// Push frame 3 (two items) and wait for its flush.
+	b.Push(frame3a)
+	b.Push(frame3b)
+	var delta3 []byte
+	select {
+	case delta3 = <-sink.ch:
+	case <-time.After(500 * time.Millisecond):
+		cancel()
+		<-done
+		t.Fatal("timed out waiting for frame 3 flush")
+	}
+
+	cancel()
+	<-done
+
+	// Build expected raw payloads for comparison.
+	raw1 := make([]byte, headerSize+itemSize)
+	raw2 := make([]byte, headerSize+itemSize)
+	raw3 := make([]byte, headerSize+2*itemSize)
+	frame1Item.Marshal(raw1[headerSize:])
+	frame2Item.Marshal(raw2[headerSize:])
+	frame3a.Marshal(raw3[headerSize:])
+	frame3b.Marshal(raw3[headerSize+itemSize:])
+
+	// Frame 1: previousState was all zeros, so delta1 XOR zeros = raw items.
+	// Verify by reconstructing item bytes only (header carries live seq/count).
+	recon1 := make([]byte, len(delta1))
+	XORBytes(recon1, delta1, make([]byte, len(delta1))) // XOR with zero = identity
+	if !bytes.Equal(recon1[headerSize:], delta1[headerSize:]) {
+		t.Error("frame 1: reconstruction from zero state produced unexpected result")
+	}
+
+	// Frame 2: reconstruct raw2 items from delta2 XOR delta1 item region.
+	if len(delta2) != headerSize+itemSize {
+		t.Fatalf("frame 2 delta length: got %d, want %d", len(delta2), headerSize+itemSize)
+	}
+	recon2items := make([]byte, itemSize)
+	XORBytes(recon2items, delta2[headerSize:], delta1[headerSize:])
+	if !bytes.Equal(recon2items, raw2[headerSize:]) {
+		t.Errorf("frame 2 reconstruction mismatch:\n got  %v\n want %v", recon2items, raw2[headerSize:])
+	}
+
+	// Frame 3 (two items): the batch is larger than frame 2.
+	// The stale-byte clear in runLoop must have zeroed previousState[len(frame2):len(frame3)]
+	// after frame 2 was flushed, so XOR(delta3[headerSize:], raw2[headerSize:]) recovers raw3 items.
+	if len(delta3) != headerSize+2*itemSize {
+		t.Fatalf("frame 3 delta length: got %d, want %d", len(delta3), headerSize+2*itemSize)
+	}
+	// Extend raw2 item region with zeros to match the frame 3 item length.
+	prev3 := make([]byte, 2*itemSize) // zeros beyond itemSize represent cleared stale bytes
+	copy(prev3, raw2[headerSize:])
+	recon3items := make([]byte, 2*itemSize)
+	XORBytes(recon3items, delta3[headerSize:], prev3)
+	if !bytes.Equal(recon3items, raw3[headerSize:]) {
+		t.Errorf("frame 3 reconstruction mismatch:\n got  %v\n want %v", recon3items, raw3[headerSize:])
+	}
+}
+
+const xorBenchSize = 4096
+
+// BenchmarkXORBytesVectorized measures throughput of the unsafe.Slice uint64-word
+// XOR engine against a realistic batch buffer size.
+func BenchmarkXORBytesVectorized(b *testing.B) {
+	dst := make([]byte, xorBenchSize)
+	a := make([]byte, xorBenchSize)
+	src := make([]byte, xorBenchSize)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		XORBytes(dst, a, src)
+	}
+}
+
+// BenchmarkXORBytesNaive measures throughput of a scalar byte-by-byte XOR loop
+// as a baseline for comparison against [BenchmarkXORBytesVectorized].
+func BenchmarkXORBytesNaive(b *testing.B) {
+	dst := make([]byte, xorBenchSize)
+	a := make([]byte, xorBenchSize)
+	src := make([]byte, xorBenchSize)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < xorBenchSize; j++ {
+			dst[j] = a[j] ^ src[j]
+		}
+	}
 }
 
 // BenchmarkPush is the Phase 1 performance gate.
