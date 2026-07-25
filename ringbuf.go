@@ -46,8 +46,9 @@ func newRingbuf[T Serializable](size uint64) *ringbuf[T] {
 	return r
 }
 
-// push attempts to enqueue item. Returns false if the buffer is full.
-func (r *ringbuf[T]) push(item T) bool {
+// push attempts to enqueue item. Returns false only when policy is [DropNewest]
+// and the buffer is full; with [DropOldest] it always retries after eviction.
+func (r *ringbuf[T]) push(item T, policy BackpressurePolicy) bool {
 	for {
 		pos := r.tail.Load()
 		s := &r.data[pos&r.mask]
@@ -66,9 +67,30 @@ func (r *ringbuf[T]) push(item T) bool {
 			}
 			// Another producer won the CAS; retry from the new tail.
 		case diff < 0:
-			// seq has fallen behind pos, meaning the slot has not yet been
-			// recycled by a consumer. The buffer is full.
-			return false
+			// seq has fallen behind pos: the slot has not been recycled yet,
+			// meaning the buffer is full.
+			if policy == DropOldest {
+				// Forcibly advance the consumer head by one to orphan the
+				// oldest item, then recycle its slot so a producer can reuse
+				// it. This is the lock-free eviction path: no mutex, no alloc.
+				//
+				// Guard: only evict a slot whose producer has already published
+				// (seq == headPos+1). If the head slot is still being written
+				// (producer won the tail CAS but has not yet stored seq+1), we
+				// spin rather than recycle — otherwise a second producer could
+				// claim the same slot concurrently and race on the item field.
+				headPos := r.head.Load()
+				hs := &r.data[headPos&r.mask]
+				if hs.seq.Load() == headPos+1 {
+					if r.head.CompareAndSwap(headPos, headPos+1) {
+						hs.seq.Store(headPos + r.mask + 1)
+					}
+				}
+				// Retry regardless: if the CAS lost or the slot was not yet
+				// published, another goroutine made progress; loop to retry.
+			} else {
+				return false
+			}
 		default:
 			// seq > pos: another producer already advanced tail past pos.
 			// Reload tail and retry.

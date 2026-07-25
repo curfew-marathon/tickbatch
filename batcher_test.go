@@ -8,44 +8,44 @@ import (
 	"unsafe"
 )
 
-// UecarrixTelemetry is a flat, pointer-free struct representing vehicle telemetry.
-// Its pointer-free nature is what guarantees O(1) GC scan time per the
+// MarketTick is a flat, pointer-free struct representing a single HFT market
+// data record. Its pointer-free nature guarantees O(1) GC scan time per the
 // Serializable contract.
-type UecarrixTelemetry struct {
-	RPM      float32
-	Speed    float32
-	Steering float32
+type MarketTick struct {
+	Price  float32
+	Volume float32
+	Spread float32
 }
 
 // Marshal implements [Serializable]. It reads bytes from the struct (which is
 // stack-allocated and properly aligned) and copies them into buf, making it
 // safe on architectures with strict alignment requirements.
-func (u UecarrixTelemetry) Marshal(buf []byte) int {
-	const size = int(unsafe.Sizeof(UecarrixTelemetry{}))
+func (m MarketTick) Marshal(buf []byte) int {
+	const size = int(unsafe.Sizeof(MarketTick{}))
 	if len(buf) < size {
 		return 0
 	}
-	copy(buf[:size], (*[size]byte)(unsafe.Pointer(&u))[:])
+	copy(buf[:size], (*[size]byte)(unsafe.Pointer(&m))[:])
 	return size
 }
 
-// NinjaDriftState is a flat, pointer-free struct simulating high-frequency
-// car telemetry data for use in tick-engine tests.
-type NinjaDriftState struct {
-	Throttle   float32
-	Brake      float32
-	SteerAngle float32
-	Velocity   float32
+// QuoteSnapshot is a flat, pointer-free struct representing a level-1 market
+// data snapshot for use in tick-engine tests.
+type QuoteSnapshot struct {
+	Bid     float32
+	Ask     float32
+	BidSize float32
+	AskSize float32
 }
 
 // Marshal implements [Serializable] by encoding the struct into buf via a direct
 // memory copy, returning the number of bytes written.
-func (n NinjaDriftState) Marshal(buf []byte) int {
-	const size = int(unsafe.Sizeof(NinjaDriftState{}))
+func (q QuoteSnapshot) Marshal(buf []byte) int {
+	const size = int(unsafe.Sizeof(QuoteSnapshot{}))
 	if len(buf) < size {
 		return 0
 	}
-	copy(buf[:size], (*[size]byte)(unsafe.Pointer(&n))[:])
+	copy(buf[:size], (*[size]byte)(unsafe.Pointer(&q))[:])
 	return size
 }
 
@@ -64,17 +64,17 @@ func (c *countingSink) Flush(_ []byte) error {
 // TestPushPop verifies the fundamental FIFO contract: a value pushed must be
 // the exact value returned on the next pop, with no corruption or reordering.
 func TestPushPop(t *testing.T) {
-	b := New[UecarrixTelemetry](Config{QueueSize: 16, MaxBatchSize: headerSize})
+	b := New[MarketTick](Config{QueueSize: 16, MaxBatchSize: headerSize})
 
-	frames := []UecarrixTelemetry{
-		{RPM: 800, Speed: 0, Steering: 0},
-		{RPM: 3500, Speed: 120.5, Steering: -0.25},
-		{RPM: 7200, Speed: 240.0, Steering: 0.88},
+	ticks := []MarketTick{
+		{Price: 100.00, Volume: 0, Spread: 0},
+		{Price: 189.98, Volume: 500.5, Spread: 0.01},
+		{Price: 415.25, Volume: 200.0, Spread: 0.02},
 	}
 
-	for _, want := range frames {
+	for _, want := range ticks {
 		b.Push(want)
-		var got UecarrixTelemetry
+		var got MarketTick
 		if !b.ring.pop(&got) {
 			t.Fatalf("pop returned false after push of %+v", want)
 		}
@@ -88,20 +88,20 @@ func TestPushPop(t *testing.T) {
 // must silently drop items and never block or panic.
 func TestPushOnFullQueueDrops(t *testing.T) {
 	const size = 4
-	b := New[UecarrixTelemetry](Config{QueueSize: size, MaxBatchSize: headerSize})
+	b := New[MarketTick](Config{QueueSize: size, MaxBatchSize: headerSize})
 
-	filler := UecarrixTelemetry{RPM: 1000}
+	filler := MarketTick{Price: 100.0}
 	for i := 0; i < size; i++ {
 		b.Push(filler)
 	}
 
 	// This push must not block, panic, or corrupt the queue.
-	overflow := UecarrixTelemetry{RPM: 9999}
+	overflow := MarketTick{Price: 999.99}
 	b.Push(overflow)
 
 	// Drain and confirm overflow item was dropped.
 	for i := 0; i < size; i++ {
-		var got UecarrixTelemetry
+		var got MarketTick
 		if !b.ring.pop(&got) {
 			t.Fatalf("expected item at slot %d", i)
 		}
@@ -110,7 +110,7 @@ func TestPushOnFullQueueDrops(t *testing.T) {
 		}
 	}
 
-	var extra UecarrixTelemetry
+	var extra MarketTick
 	if b.ring.pop(&extra) {
 		t.Error("queue must be empty after draining exactly size items")
 	}
@@ -125,7 +125,7 @@ func TestRunLoop(t *testing.T) {
 	)
 
 	sink := &countingSink{}
-	b := New[NinjaDriftState](Config{
+	b := New[QuoteSnapshot](Config{
 		QueueSize:    1 << 10,
 		MaxBatchSize: 4096,
 		TickRate:     tickRate,
@@ -137,7 +137,7 @@ func TestRunLoop(t *testing.T) {
 
 	done := b.Start(ctx)
 
-	state := NinjaDriftState{Throttle: 1.0, Brake: 0.0, SteerAngle: 0.3, Velocity: 88.5}
+	state := QuoteSnapshot{Bid: 189.97, Ask: 189.98, BidSize: 300, AskSize: 100}
 	for i := 0; i < pushCount; i++ {
 		b.Push(state)
 	}
@@ -274,7 +274,7 @@ func TestNewPanicsOnZeroQueueSize(t *testing.T) {
 			t.Error("New with QueueSize=0 did not panic")
 		}
 	}()
-	New[UecarrixTelemetry](Config{QueueSize: 0, MaxBatchSize: headerSize})
+	New[MarketTick](Config{QueueSize: 0, MaxBatchSize: headerSize})
 }
 
 // TestNewPanicsOnNonPowerOfTwoQueueSize verifies that New panics when QueueSize
@@ -285,7 +285,7 @@ func TestNewPanicsOnNonPowerOfTwoQueueSize(t *testing.T) {
 			t.Error("New with non-power-of-two QueueSize did not panic")
 		}
 	}()
-	New[UecarrixTelemetry](Config{QueueSize: 3, MaxBatchSize: headerSize})
+	New[MarketTick](Config{QueueSize: 3, MaxBatchSize: headerSize})
 }
 
 // TestStartPanicsOnNonPositiveTickRate verifies that Start panics when
@@ -296,14 +296,14 @@ func TestStartPanicsOnNonPositiveTickRate(t *testing.T) {
 			t.Error("Start with TickRate=0 did not panic")
 		}
 	}()
-	b := New[UecarrixTelemetry](Config{QueueSize: 16, MaxBatchSize: headerSize})
+	b := New[MarketTick](Config{QueueSize: 16, MaxBatchSize: headerSize})
 	b.Start(context.Background())
 }
 
 // TestStartPanicsOnDoubleStart verifies that calling Start a second time panics,
 // preventing two drain goroutines from racing on the shared byteBuffer.
 func TestStartPanicsOnDoubleStart(t *testing.T) {
-	b := New[UecarrixTelemetry](Config{
+	b := New[MarketTick](Config{
 		QueueSize:    16,
 		MaxBatchSize: headerSize,
 		TickRate:     60,
@@ -371,11 +371,65 @@ func TestStdoutSinkFlush(t *testing.T) {
 	}
 }
 
+// TestDropOldestEvictsOldestItem verifies the functional correctness of DropOldest
+// eviction: pushing into a full queue must remove the head item and enqueue the
+// new item, leaving all intermediate items intact and in FIFO order.
+func TestDropOldestEvictsOldestItem(t *testing.T) {
+	const size = 4
+	b := New[OrderUpdate](Config{
+		QueueSize:    size,
+		MaxBatchSize: headerSize,
+		Backpressure: DropOldest,
+	})
+
+	// Fill the queue with orders 1 through 4.
+	for i := uint32(1); i <= size; i++ {
+		b.Push(OrderUpdate{OrderID: i})
+	}
+
+	// Order 5 must evict order 1 (the oldest).
+	b.Push(OrderUpdate{OrderID: 5})
+
+	// Drain all available items.
+	var got []OrderUpdate
+	for {
+		var item OrderUpdate
+		if !b.ring.pop(&item) {
+			break
+		}
+		got = append(got, item)
+	}
+
+	if len(got) != size {
+		t.Fatalf("expected %d items after eviction, got %d", size, len(got))
+	}
+
+	// Order 1 must be absent; orders 2–5 must appear in FIFO order.
+	want := []uint32{2, 3, 4, 5}
+	for i, item := range got {
+		if item.OrderID != want[i] {
+			t.Errorf("slot %d: got OrderID=%d, want %d (oldest must be evicted, newest must survive)",
+				i, item.OrderID, want[i])
+		}
+	}
+}
+
+// TestNewPanicsOnInvalidBackpressurePolicy verifies that New panics when
+// Config.Backpressure is set to an unrecognized policy value.
+func TestNewPanicsOnInvalidBackpressurePolicy(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("New with invalid BackpressurePolicy did not panic")
+		}
+	}()
+	New[OrderUpdate](Config{QueueSize: 16, MaxBatchSize: headerSize, Backpressure: BackpressurePolicy(99)})
+}
+
 // BenchmarkPush is the Phase 1 performance gate.
 // Success criterion: 0 B/op and 0 allocs/op.
 func BenchmarkPush(b *testing.B) {
-	batcher := New[UecarrixTelemetry](Config{QueueSize: 1 << 16, MaxBatchSize: headerSize})
-	item := UecarrixTelemetry{RPM: 9000, Speed: 200, Steering: 0.1}
+	batcher := New[MarketTick](Config{QueueSize: 1 << 16, MaxBatchSize: headerSize})
+	item := MarketTick{Price: 415.25, Volume: 200, Spread: 0.01}
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -384,7 +438,7 @@ func BenchmarkPush(b *testing.B) {
 		batcher.Push(item)
 		// Drain inline to prevent the buffer from filling and masking
 		// the true push cost with a false-full early-return.
-		var sink UecarrixTelemetry
+		var sink MarketTick
 		batcher.ring.pop(&sink)
 	}
 }
