@@ -79,3 +79,9 @@ linters:
           - gocritic
         text: "hugeParam"
         path: "batcher\\.go"
+
+      # example_test.go is the pkg.go.dev example file and must import the
+      # package under test; depguard's $gostd-only rule does not apply here.
+      - linters:
+          - depguard
+        path: "example_test\\.go"
