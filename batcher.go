@@ -393,6 +393,10 @@ func (b *Batcher[T]) drainAndFlush(prevOffset *int) {
 		return
 	}
 
+	// Header bytes [0:8] are explicit little-endian regardless of host byte order.
+	// Body bytes [8:N] are native-endian: T.Marshal writes raw in-memory
+	// representations via unsafe.Pointer. A big-endian receiver requires a
+	// bespoke decoder that accounts for this asymmetry.
 	seq := b.sequenceID.Add(1)
 	b.byteBuffer[0] = byte(seq)
 	b.byteBuffer[1] = byte(seq >> 8)
