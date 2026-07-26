@@ -280,15 +280,43 @@ go test -fuzz=FuzzTickSerialization -fuzztime=60s ./...
 
 Every component is designed for production instrumentation. The following zero-allocation counters are available on every `Batcher`:
 
+**Loss counters**
+
 | Method | Description |
 |---|---|
 | `DroppedCount()` | Items discarded because the ring was full under `DropNewest`. |
 | `EvictedCount()` | Items evicted from the ring head under `DropOldest`. |
 | `TruncatedCount()` | Items dequeued but discarded because `Marshal` returned zero bytes — indicates a bug in `T.Marshal` or a `MaxItemSize` configured smaller than the actual encoded size. |
+
+**Delivery counters**
+
+| Method | Description |
+|---|---|
 | `FlushedBatches()` | Total batches successfully delivered to `Sink.Flush`. |
 | `FlushedItems()` | Total items serialized across all flushes. |
+| `BytesFlushed()` | Total payload bytes delivered; use with `FlushedItems()` for ingested-vs-delivered reconciliation. |
+| `FlushErrorCount()` | Cumulative failed `Sink.Flush` calls, including timeouts. |
+| `LastFlushAt()` | Wall-clock time of the most recent successful flush (`time.Time{}` if none). |
 
-`FlushedItems() / FlushedBatches()` gives the average batch fill rate. `DroppedCount() + EvictedCount()` gives cumulative data loss across both backpressure policies. All counters are `atomic.Uint64` reads — zero allocations, safe to call from any goroutine at any time.
+**Saturation and drain-rate**
+
+| Method | Description |
+|---|---|
+| `QueueDepth()` | Best-effort snapshot of items currently in the ring buffer. |
+| `QueueCap()` | Ring buffer capacity (equals `Config.QueueSize` rounded to next power of two). |
+| `CoalescedTicks()` | Drain cycles skipped because a flush overran the tick interval. |
+
+`FlushedItems() / FlushedBatches()` gives the average batch fill rate. `DroppedCount() + EvictedCount()` gives cumulative data loss across both backpressure policies. All counters are `atomic.Uint64`/`atomic.Int64` reads — zero allocations, safe to call from any goroutine at any time.
+
+**Leading-indicator alerts** (fire before loss begins):
+
+```
+# Ring saturation — page before DropNewest/DropOldest activates
+QueueDepth() / QueueCap() > 0.8
+
+# Sink stalled or partitioned — primary MTTR clock
+time.Since(b.LastFlushAt()) > 5*time.Second
+```
 
 ---
 

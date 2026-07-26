@@ -2,6 +2,7 @@ package tickbatch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -85,6 +86,18 @@ type Config struct {
 	// log.Printf otherwise.
 	ShutdownTimeout time.Duration
 
+	// FlushTimeout bounds how long a single Sink.Flush call may block before the
+	// drain goroutine treats it as an error. Zero disables the per-flush timeout
+	// (the default). When the timeout fires, [ErrFlushTimeout] is passed to
+	// [Config.OnFlushError] (or logged) and the flush is abandoned; the underlying
+	// goroutine may still be running until the OS unblocks the I/O, but the drain
+	// loop is immediately free to process subsequent ticks.
+	//
+	// This is the primary lever for bounding the tarpit failure mode: without it,
+	// a slow or partitioned sink parks the sole drain goroutine indefinitely,
+	// silently stalling delivery while producers continue filling the ring.
+	FlushTimeout time.Duration
+
 	// DeltaEncoding, when true, XORs each flushed payload against the previous
 	// frame before passing it to Sink.Flush. Receivers must XOR with their own
 	// copy of the prior frame to reconstruct the original batch. When false
@@ -98,6 +111,11 @@ type Config struct {
 	// [New] panics otherwise.
 	DeltaEncoding bool
 }
+
+// ErrFlushTimeout is passed to [Config.OnFlushError] when a Sink.Flush call
+// exceeds [Config.FlushTimeout]. The underlying flush goroutine may still be
+// running; the drain loop proceeds to subsequent ticks without waiting for it.
+var ErrFlushTimeout = errors.New("tickbatch: flush timeout exceeded")
 
 // Batcher is a generic, lock-free telemetry batching engine.
 //
@@ -118,12 +136,17 @@ type Batcher[T Serializable] struct {
 	_       [56]byte // 8 (dropped) + 56 = 64 bytes: one full cache line
 
 	// Consumer-written exclusively by the background flush goroutine. Grouped
-	// together — no cross-thread writes within this group.
+	// together — no cross-thread writes within this group. The block is exactly
+	// 64 bytes (one cache line): 4+4+8+8+8+8+8+8+8 = 64.
 	sequenceID     atomic.Uint32
 	_              [4]byte // align next uint64
 	truncated      atomic.Uint64
 	flushedBatches atomic.Uint64
 	flushedItems   atomic.Uint64
+	flushErrs      atomic.Uint64
+	bytesFlushed   atomic.Uint64
+	lastFlushAt    atomic.Int64 // unix nanos; 0 = never flushed
+	coalescedTicks atomic.Uint64
 }
 
 // New allocates and returns a ready-to-use Batcher.
@@ -218,6 +241,67 @@ func (b *Batcher[T]) FlushedItems() uint64 {
 	return b.flushedItems.Load()
 }
 
+// FlushErrorCount returns the cumulative number of failed Sink.Flush calls,
+// including flushes abandoned due to [Config.FlushTimeout]. A rising count while
+// [Batcher.LastFlushAt] is stale is the primary indicator of a tarpitted or
+// partitioned downstream sink.
+func (b *Batcher[T]) FlushErrorCount() uint64 {
+	return b.flushErrs.Load()
+}
+
+// BytesFlushed returns the total number of payload bytes successfully delivered
+// to [Sink.Flush] across all batches. Together with [Batcher.FlushedItems] this
+// enables ingested-vs-delivered reconciliation to quantify silent data loss.
+func (b *Batcher[T]) BytesFlushed() uint64 {
+	return b.bytesFlushed.Load()
+}
+
+// LastFlushAt returns the wall-clock time of the most recent successful
+// Sink.Flush call. Returns the zero [time.Time] if no flush has completed yet.
+// Use time.Since(b.LastFlushAt()) as the MTTR clock during a partition: a value
+// exceeding your SLO tolerance means no data has been delivered since that point.
+func (b *Batcher[T]) LastFlushAt() time.Time {
+	ns := b.lastFlushAt.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
+}
+
+// QueueDepth returns a best-effort snapshot of the number of items currently
+// waiting in the ring buffer. Because head and tail are read independently
+// without a lock, the value may be transiently inconsistent; use it for
+// saturation alerting (e.g. QueueDepth()/QueueCap() > 0.8) rather than exact
+// accounting. A rising depth is a leading indicator of loss — it signals
+// backpressure before DroppedCount or EvictedCount become non-zero.
+func (b *Batcher[T]) QueueDepth() uint64 {
+	tail := b.ring.tail.Load()
+	head := b.ring.head.Load()
+	if tail >= head {
+		return tail - head
+	}
+	// Transient read ordering: head appears ahead of tail; report zero rather
+	// than wrapping a uint64 to ~18 quintillion.
+	return 0
+}
+
+// QueueCap returns the ring buffer capacity as set by [Config.QueueSize]
+// (rounded up to the next power of two by [New]).
+func (b *Batcher[T]) QueueCap() uint64 {
+	return b.ring.mask + 1
+}
+
+// CoalescedTicks returns the number of drain cycles that were skipped because a
+// Sink.Flush call overran the configured tick interval. The count is computed
+// arithmetically (floor(flush_duration/tick_interval) - 1) rather than from the
+// ticker channel depth, which silently caps at 1 regardless of actual slippage.
+// A rising value means the engine is draining slower than [Config.TickRate];
+// consider lowering [Config.FlushTimeout] to fail fast, or raising
+// [Config.TickRate] to match the sink's sustained throughput.
+func (b *Batcher[T]) CoalescedTicks() uint64 {
+	return b.coalescedTicks.Load()
+}
+
 // Start launches the tick engine in a background goroutine and returns a channel
 // that is closed once the goroutine has fully exited.
 //
@@ -238,6 +322,29 @@ func (b *Batcher[T]) Start(ctx context.Context) <-chan struct{} {
 		b.runLoop(ctx)
 	}()
 	return done
+}
+
+// flushWithTimeout calls Sink.Flush, optionally bounding it with a deadline.
+// If [Config.FlushTimeout] is zero, the call is direct and allocation-free.
+// If non-zero, Flush runs in a one-shot goroutine (allocation acceptable — this
+// is the consumer path, not the zero-alloc Push hot path). On timeout,
+// [ErrFlushTimeout] is returned immediately; the goroutine may still be running
+// until the OS unblocks the underlying I/O, but the buffered channel ensures it
+// can always write its result and garbage collect without blocking.
+func (b *Batcher[T]) flushWithTimeout(payload []byte) error {
+	if b.cfg.FlushTimeout == 0 {
+		return b.cfg.Sink.Flush(payload)
+	}
+	ch := make(chan error, 1)
+	go func() { ch <- b.cfg.Sink.Flush(payload) }()
+	t := time.NewTimer(b.cfg.FlushTimeout)
+	defer t.Stop()
+	select {
+	case err := <-ch:
+		return err
+	case <-t.C:
+		return ErrFlushTimeout
+	}
 }
 
 // drainAndFlush dequeues all available items from the ring buffer, serializes
@@ -301,7 +408,8 @@ func (b *Batcher[T]) drainAndFlush(prevOffset *int) {
 			}
 			payload = b.compressBuffer[:cn]
 		}
-		if err := b.cfg.Sink.Flush(payload); err != nil {
+		if err := b.flushWithTimeout(payload); err != nil {
+			b.flushErrs.Add(1)
 			if b.cfg.OnFlushError != nil {
 				b.cfg.OnFlushError(err)
 			} else {
@@ -310,6 +418,8 @@ func (b *Batcher[T]) drainAndFlush(prevOffset *int) {
 		} else {
 			b.flushedBatches.Add(1)
 			b.flushedItems.Add(uint64(n))
+			b.bytesFlushed.Add(uint64(len(payload)))
+			b.lastFlushAt.Store(time.Now().UnixNano())
 		}
 		return
 	}
@@ -337,7 +447,8 @@ func (b *Batcher[T]) drainAndFlush(prevOffset *int) {
 		}
 		payload = b.compressBuffer[:cn]
 	}
-	if err := b.cfg.Sink.Flush(payload); err != nil {
+	if err := b.flushWithTimeout(payload); err != nil {
+		b.flushErrs.Add(1)
 		if b.cfg.OnFlushError != nil {
 			b.cfg.OnFlushError(err)
 		} else {
@@ -351,6 +462,8 @@ func (b *Batcher[T]) drainAndFlush(prevOffset *int) {
 		*prevOffset = offset
 		b.flushedBatches.Add(1)
 		b.flushedItems.Add(uint64(n))
+		b.bytesFlushed.Add(uint64(len(payload)))
+		b.lastFlushAt.Store(time.Now().UnixNano())
 	}
 }
 
@@ -359,7 +472,8 @@ func (b *Batcher[T]) drainAndFlush(prevOffset *int) {
 // to the configured Sink on every wake. When the context is canceled, it performs
 // one final drain to flush any remaining items before exiting.
 func (b *Batcher[T]) runLoop(ctx context.Context) {
-	ticker := time.NewTicker(time.Second / time.Duration(b.cfg.TickRate))
+	tickInterval := time.Second / time.Duration(b.cfg.TickRate)
+	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
 
 	var prevOffset int
@@ -390,7 +504,15 @@ func (b *Batcher[T]) runLoop(ctx context.Context) {
 			}
 			return
 		case <-ticker.C:
+			tickStart := time.Now()
 			b.drainAndFlush(&prevOffset)
+			// Measure true tick slippage arithmetically rather than via len(ticker.C).
+			// Go's ticker channel has depth 1 and silently drops overflowed ticks, so
+			// a 500ms flush against a 10ms tick interval would count as 1 missed tick
+			// from channel length, but floor(500/10)-1 = 49 is the true slippage.
+			if elapsed := time.Since(tickStart); elapsed > tickInterval {
+				b.coalescedTicks.Add(uint64(elapsed/tickInterval) - 1)
+			}
 		}
 	}
 }
