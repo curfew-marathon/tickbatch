@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 	"unsafe"
@@ -246,6 +247,12 @@ func TestTCPSinkErrorCountOnBrokenConn(t *testing.T) {
 }
 
 func TestTCPSinkUnixDomainSocket(t *testing.T) {
+	// Unix Domain Sockets on Windows use Windows file paths; /tmp does not exist
+	// there and the sidecar UDS use case targets POSIX systems only.
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix domain sockets require a POSIX file path; skipping on Windows")
+	}
+
 	// Verify that NewTCPSink("unix", path) works end-to-end.
 	// macOS caps Unix socket paths at 104 bytes; use a short /tmp path.
 	path := fmt.Sprintf("/tmp/tb%d.sock", os.Getpid())
