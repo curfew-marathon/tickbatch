@@ -33,7 +33,7 @@ tickbatch is a zero-impact exhaust pipe. It completely decouples the event produ
 
 **The producer never touches the network. The network never touches the producer.**
 
-The ingest path is a single atomic compare-and-swap against a pre-allocated ring buffer slot. No locks. No channels. No goroutine handoffs. No heap activity. If the buffer is full, the oldest item is evicted or the new one is silently dropped — the caller is never stalled, never panicked, and never blocked behind a slow Kafka producer or a saturated UDP socket.
+The ingest path is a single atomic compare-and-swap against a pre-allocated ring buffer slot. No locks. No channels. No goroutine handoffs. No heap activity. If the buffer is full, the new item is silently dropped (or, when `DropOldest` is configured, the oldest item is evicted) — the caller is never stalled, never panicked, and never blocked behind a slow Kafka producer or a saturated UDP socket.
 
 A background goroutine drains the ring at a fixed Hz, serializes directly into a pre-allocated byte buffer via the `Serializable` interface, and hands the batch to your `Sink`. One function call to your transport. Zero allocations. The GC has nothing to scan on the hot path.
 
@@ -166,7 +166,8 @@ func main() {
     b := tickbatch.New[RiskSnapshot](tickbatch.Config{
         QueueSize:    1 << 12, // 4096 slots, must be a power of two
         MaxBatchSize: 64 * 1024,
-        TickRate:     100,             // drain and flush 100 times per second
+        MaxItemSize:  int(unsafe.Sizeof(RiskSnapshot{})),
+        TickRate:     100, // drain and flush 100 times per second
         Sink:         ComplianceSink{},
     })
 
@@ -179,8 +180,9 @@ func main() {
     done := b.Start(ctx)
 
     // Push from any goroutine. Non-blocking. Zero allocations.
-    // If the queue is full, the item is silently dropped or the oldest evicted —
-    // the producer is never stalled behind downstream I/O.
+    // If the queue is full, the new item is silently dropped (or the oldest evicted
+    // when DropOldest is configured) — the producer is never stalled behind downstream I/O.
+    // Synthetic firehose: real producers should pace with time.Ticker or event-driven pushes.
     go func() {
         for {
             select {
@@ -235,9 +237,32 @@ All cursor and sequence operations use `sync/atomic`. In Go's memory model, atom
 
 The critical design property is that `Sink.Flush` never executes on the producer's goroutine. The producer touches only the ring buffer (a single atomic CAS). The drain goroutine owns all serialization, compression, and network I/O. A 200 ms disk stall, a TCP backpressure event, or a slow Kafka broker never propagates back to the producer. The ring buffer absorbs the burst; backpressure is applied by silently dropping or evicting items — never by blocking the caller.
 
+### Wire Format
+
+Every payload delivered to `Sink.Flush` uses the following fixed layout:
+
+```
+Bytes [0:4]  — sequence ID, little-endian uint32 (monotonically increasing per Batcher)
+Bytes [4:6]  — item count, little-endian uint16
+Bytes [6:8]  — reserved, always zero
+Bytes [8:N]  — packed items, each written by T.Marshal() back-to-back with no separator
+```
+
+When `Config.DeltaEncoding` is true, the payload delivered to `Sink.Flush` is the XOR of the current raw frame against the previous raw frame. Receivers must maintain a copy of the prior raw frame and XOR it with each received frame to reconstruct the original batch. If a frame is lost in transit (e.g. over UDP), all subsequent frames produce corrupt output — only enable delta encoding over reliable transports.
+
 ### Observability
 
-Every component is designed for production instrumentation. Wrap `Sink.Flush` to capture payload sizes, inter-flush intervals, and drop rates. The drain count per tick (items flushed vs. ticks fired) gives you instantaneous queue depth without a single additional allocation. SRE dashboards get real metrics; the hot path pays nothing for them.
+Every component is designed for production instrumentation. The following zero-allocation counters are available on every `Batcher`:
+
+| Method | Description |
+|---|---|
+| `DroppedCount()` | Items discarded because the ring was full under `DropNewest`. |
+| `EvictedCount()` | Items evicted from the ring head under `DropOldest`. |
+| `TruncatedCount()` | Items dequeued but discarded because `Marshal` returned zero bytes — indicates a bug in `T.Marshal` or a `MaxItemSize` configured smaller than the actual encoded size. |
+| `FlushedBatches()` | Total batches successfully delivered to `Sink.Flush`. |
+| `FlushedItems()` | Total items serialized across all flushes. |
+
+`FlushedItems() / FlushedBatches()` gives the average batch fill rate. `DroppedCount() + EvictedCount()` gives cumulative data loss across both backpressure policies. All counters are `atomic.Uint64` reads — zero allocations, safe to call from any goroutine at any time.
 
 ---
 

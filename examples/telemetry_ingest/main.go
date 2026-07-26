@@ -10,7 +10,7 @@ import (
 	"time"
 	"unsafe"
 
-	tickbatch "github.com/curfew-marathon/tickbatch"
+	"github.com/curfew-marathon/tickbatch"
 )
 
 // riskEventSize is the encoded byte size of one RiskEvent.
@@ -57,6 +57,7 @@ func main() {
 		Sink:         sink,
 		QueueSize:    1 << 14,
 		MaxBatchSize: 1 << 16,
+		MaxItemSize:  riskEventSize,
 		TickRate:     60,
 		Backpressure: tickbatch.DropOldest,
 		OnFlushError: func(err error) {

@@ -65,7 +65,7 @@ func (c *countingSink) Flush(_ []byte) error {
 // TestPushPop verifies the fundamental FIFO contract: a value pushed must be
 // the exact value returned on the next pop, with no corruption or reordering.
 func TestPushPop(t *testing.T) {
-	b := New[MarketTick](Config{QueueSize: 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12})
+	b := New[MarketTick](Config{QueueSize: 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 60})
 
 	ticks := []MarketTick{
 		{Price: 100.00, Volume: 0, Spread: 0},
@@ -89,7 +89,7 @@ func TestPushPop(t *testing.T) {
 // must silently drop items and never block or panic.
 func TestPushOnFullQueueDrops(t *testing.T) {
 	const size = 4
-	b := New[MarketTick](Config{QueueSize: size, MaxBatchSize: headerSize + 12, MaxItemSize: 12})
+	b := New[MarketTick](Config{QueueSize: size, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 60})
 
 	filler := MarketTick{Price: 100.0}
 	for i := 0; i < size; i++ {
@@ -277,7 +277,7 @@ func TestNewPanicsOnZeroQueueSize(t *testing.T) {
 			t.Error("New with QueueSize=0 did not panic")
 		}
 	}()
-	New[MarketTick](Config{QueueSize: 0, MaxBatchSize: headerSize + 12, MaxItemSize: 12})
+	New[MarketTick](Config{QueueSize: 0, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 60})
 }
 
 // TestNewPanicsOnNonPowerOfTwoQueueSize verifies that New panics when QueueSize
@@ -288,19 +288,29 @@ func TestNewPanicsOnNonPowerOfTwoQueueSize(t *testing.T) {
 			t.Error("New with non-power-of-two QueueSize did not panic")
 		}
 	}()
-	New[MarketTick](Config{QueueSize: 3, MaxBatchSize: headerSize + 12, MaxItemSize: 12})
+	New[MarketTick](Config{QueueSize: 3, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 60})
 }
 
-// TestStartPanicsOnNonPositiveTickRate verifies that Start panics when
-// Config.TickRate is zero or negative, catching invalid configurations early.
-func TestStartPanicsOnNonPositiveTickRate(t *testing.T) {
+// TestNewPanicsOnNonPositiveTickRate verifies that New panics when
+// Config.TickRate is zero or negative, catching invalid configurations at construction.
+func TestNewPanicsOnNonPositiveTickRate(t *testing.T) {
 	defer func() {
 		if recover() == nil {
-			t.Error("Start with TickRate=0 did not panic")
+			t.Error("New with TickRate=0 did not panic")
 		}
 	}()
-	b := New[MarketTick](Config{QueueSize: 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12})
-	b.Start(context.Background())
+	New[MarketTick](Config{QueueSize: 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12})
+}
+
+// TestNewPanicsOnExcessiveTickRate verifies that New panics when Config.TickRate
+// exceeds 1_000_000_000, which would cause time.NewTicker to receive a zero duration.
+func TestNewPanicsOnExcessiveTickRate(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("New with TickRate=1_000_000_001 did not panic")
+		}
+	}()
+	New[MarketTick](Config{QueueSize: 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 1_000_000_001})
 }
 
 // TestStartPanicsOnDoubleStart verifies that calling Start a second time panics,
@@ -395,6 +405,7 @@ func TestDropOldestEvictsOldestItem(t *testing.T) {
 		QueueSize:    size,
 		MaxBatchSize: headerSize + 24,
 		MaxItemSize:  24,
+		TickRate:     60,
 		Backpressure: DropOldest,
 	})
 
@@ -792,7 +803,7 @@ func BenchmarkXORBytesNaive(b *testing.B) {
 // BenchmarkPush is the Phase 1 performance gate.
 // Success criterion: 0 B/op and 0 allocs/op.
 func BenchmarkPush(b *testing.B) {
-	batcher := New[MarketTick](Config{QueueSize: 1 << 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12})
+	batcher := New[MarketTick](Config{QueueSize: 1 << 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 60})
 	item := MarketTick{Price: 415.25, Volume: 200, Spread: 0.01}
 
 	b.ResetTimer()
@@ -938,6 +949,7 @@ func TestEvictedCount(t *testing.T) {
 		QueueSize:    size,
 		MaxBatchSize: headerSize + 24,
 		MaxItemSize:  24,
+		TickRate:     60,
 		Backpressure: DropOldest,
 	})
 
