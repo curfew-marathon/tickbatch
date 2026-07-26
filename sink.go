@@ -6,7 +6,12 @@ import "fmt"
 //
 // Implementations receive a fully-serialized byte payload and are responsible
 // for delivering it to the desired downstream system. Flush must not retain
-// the payload slice beyond the call — callers reuse the underlying buffer.
+// the payload slice beyond the call; callers reuse the underlying buffer.
+//
+// Async broker clients (Kafka producers, gRPC streams, and any driver that
+// enqueues the slice and returns before transmitting) must copy the payload
+// before returning. Use [CopyingSink] to do this once rather than in every
+// custom adapter.
 type Sink interface {
 	// Flush delivers a serialized batch payload to the downstream transport.
 	// It must not retain payload beyond the duration of the call.
