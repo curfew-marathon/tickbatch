@@ -81,6 +81,7 @@ jobs:
         shell: bash
         env:
           BASE_REF: ${{ github.base_ref }}
+          GOTOOLCHAIN: auto
         run: |
           git checkout "$BASE_REF"
           go test -bench=. -benchmem -count=5 ./... | tee main.out
