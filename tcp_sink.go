@@ -2,6 +2,8 @@ package tickbatch
 
 import (
 	"encoding/binary"
+	"fmt"
+	"io"
 	"net"
 )
 
@@ -23,8 +25,10 @@ import (
 // and a socket path as addr. The framing and delivery semantics are identical.
 type TCPSink struct {
 	conn net.Conn
-	// lbuf is the length-prefix scratch buffer. It is mutated without a lock
-	// because Flush is only ever called from the single drain goroutine.
+	// lbuf is the length-prefix scratch buffer. At most one Flush call is active
+	// at a time: either the drain goroutine calls directly (FlushTimeout == 0) or
+	// flushInFlight serializes concurrent goroutine-based calls (FlushTimeout > 0).
+	// No mutex is needed.
 	lbuf [4]byte
 }
 
@@ -47,8 +51,14 @@ func NewTCPSink(network, addr string) (*TCPSink, error) {
 func (t *TCPSink) Flush(payload []byte) error {
 	binary.LittleEndian.PutUint32(t.lbuf[:], uint32(len(payload)))
 	bufs := net.Buffers{t.lbuf[:], payload}
-	_, err := bufs.WriteTo(t.conn)
-	return err
+	n, err := bufs.WriteTo(t.conn)
+	if err != nil {
+		return err
+	}
+	if want := int64(4 + len(payload)); n != want {
+		return fmt.Errorf("tickbatch: TCPSink short write: wrote %d of %d bytes: %w", n, want, io.ErrShortWrite)
+	}
+	return nil
 }
 
 func (t *TCPSink) reliable() {}

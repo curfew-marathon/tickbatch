@@ -256,6 +256,7 @@ func TestTCPSinkUnixDomainSocket(t *testing.T) {
 	// Verify that NewTCPSink("unix", path) works end-to-end.
 	// macOS caps Unix socket paths at 104 bytes; use a short /tmp path.
 	path := fmt.Sprintf("/tmp/tb%d.sock", os.Getpid())
+	_ = os.Remove(path) // remove any socket left by a crashed previous run
 	t.Cleanup(func() {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			t.Logf("socket remove: %v", err)
