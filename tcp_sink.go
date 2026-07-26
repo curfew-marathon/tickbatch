@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"time"
 )
@@ -56,6 +57,12 @@ func (t *TCPSink) Flush(ctx context.Context, payload []byte) error {
 	if dl, ok := ctx.Deadline(); ok {
 		_ = t.conn.SetWriteDeadline(dl)
 		defer func() { _ = t.conn.SetWriteDeadline(time.Time{}) }()
+	}
+	// The length prefix is a uint32; a payload above 4 GiB would silently truncate
+	// modulo 2^32 and corrupt the framing of every subsequent frame on the stream.
+	// Reject it explicitly rather than emit an unparseable prefix.
+	if uint64(len(payload)) > math.MaxUint32 {
+		return fmt.Errorf("tickbatch: TCPSink payload %d bytes exceeds the 4 GiB length-prefix limit", len(payload))
 	}
 	binary.LittleEndian.PutUint32(t.lbuf[:], uint32(len(payload)))
 	bufs := net.Buffers{t.lbuf[:], payload}

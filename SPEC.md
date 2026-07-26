@@ -2,7 +2,10 @@
 
 This document specifies the on-wire frame format produced by `Batcher` and passed
 to `Sink.Flush`. It is the contract third-party decoders implement. The reference
-decoder in [`codec/`](./codec) implements exactly this spec.
+decoder in [`codec/`](./codec) implements the framing, CRC, and delta-reconstruction
+parts of this spec. It does **not** perform decompression: when a `Compressor` is
+configured the caller must decompress each frame first (see "Codec configuration is
+out-of-band" below) before handing it to `codec`.
 
 The format is frozen for the v1.x series. Fields are added only via the flags
 mechanism described below; existing field positions and meanings never change.
@@ -40,14 +43,15 @@ it is always little-endian.
 
 ### Marshal contract
 
-`Marshal(buf []byte) int` must:
-- write **at least 1 byte** and return the count written;
-- never return more than `len(buf)`.
+`Marshal(buf []byte) int` returns the number of bytes it wrote into buf and must
+never return more than `len(buf)`.
 
-A return of `0` means "nothing written": the engine drops that item and increments
-`TruncatedCount()`. A return greater than `len(buf)` is a contract violation; the
-engine defensively drops the item and increments `TruncatedCount()` rather than
-overrunning its buffer. Neither case ever panics.
+To be delivered in a batch, an item must write at least 1 byte. A return of `0` is
+a valid signal meaning "nothing to encode": the engine drops that item and increments
+`TruncatedCount()` (so `0` is permitted, not an error, but it is never carried on the
+wire). A return greater than `len(buf)` is a contract violation; the engine defensively
+drops the item and increments `TruncatedCount()` rather than overrunning its buffer.
+Neither case ever panics.
 
 ## Codec configuration is out-of-band
 
@@ -82,6 +86,24 @@ Receiver rules (see [`codec.DeltaReconstructor`](./codec)):
   recovered header. The CRC - computed by the sender over the raw body *before* XOR -
   is the disambiguator; a delta frame whose header bit happens to read as 1 will fail
   the direct CRC check and fall through to the delta path.
+
+### Mid-stream joins and baseline recovery
+
+A `DeltaReconstructor` starts from an all-zero baseline, which matches the sender's
+initial `previousState`. A receiver that begins at frame 1 is therefore correct with
+no special handling.
+
+A receiver that joins **mid-stream** (or restarts) has no valid baseline. It must wait
+for a keyframe (bit 15 set, emitted only when `KeyframeInterval > 0`) before its output
+is trustworthy. Until a keyframe arrives, delta frames decode against the wrong baseline
+and the reconstructed body fails its CRC check, so the reference decoder returns
+`ErrCRCMismatch` rather than emitting corrupt data - the CRC is what protects against a
+bad baseline; the reconstructor does not blindly trust `prev`.
+
+In `KeyframeInterval == 0` mode no keyframes are ever emitted, so mid-stream joins are
+unsupported by design: both ends must share the implicit zero baseline from frame 1.
+This is one reason `DeltaEncoding` requires a `ReliableSink` (no dropped frames) rather
+than a fire-and-forget transport.
 
 ### Sequence gaps do NOT imply desync
 

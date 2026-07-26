@@ -22,7 +22,7 @@ This runbook covers the two failure modes that produce data loss in a tickbatch 
 
 ## Failure mode A - Sink stalled (tarpit / network partition)
 
-**Symptom:** `EvictedCount` or `DroppedCount` is climbing **and** `time.Since(b.LastFlushAt())` exceeds your threshold. `FlushErrorCount` may be rising too (if `Config.FlushTimeout` is set).
+**Symptom:** `EvictedCount` or `DroppedCount` is climbing **and**, once at least one flush has succeeded (`LastFlushAt` is non-zero), `time.Since(b.LastFlushAt())` exceeds your threshold. `FlushErrorCount` may be rising too (if `Config.FlushTimeout` is set). Note the zero `LastFlushAt` case separately (step 1): before the first successful flush it is the zero time, so `time.Since` reads as "infinitely stale" and must not by itself be taken as a mid-run stall.
 
 **What is happening:** The drain goroutine is blocked inside `Sink.Flush`. Meanwhile, producers continue running and can keep incrementing `DroppedCount` and `EvictedCount` independently - these counters are not paused by a stalled drain. Without a `FlushTimeout`, a partitioned sink can park the sole drain goroutine indefinitely.
 

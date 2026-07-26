@@ -33,5 +33,9 @@ forward these metrics into an OTel pipeline:
 | `QueueDepth`            | queue size                        | Best-effort gauge; leading saturation indicator.  |
 | `QueueCap`              | queue capacity                    | Ring capacity.                                     |
 
-Total data loss is `Dropped + Evicted + Truncated`. A rising `FlushErrors` while
-`LastFlushAt` is stale is the primary signal of a partitioned downstream sink.
+Queue-side data loss (items that never reached the sink) is `Dropped + Evicted +
+Truncated`. This does not include flush-side loss: a failed or timed-out `Sink.Flush`
+abandons an entire already-serialized batch without touching those counters - that
+loss is signaled by `FlushErrors` (and the undelivered bytes are absent from
+`BytesFlushed`). A rising `FlushErrors` while `LastFlushAt` is stale is the primary
+signal of a partitioned downstream sink.

@@ -52,6 +52,22 @@ func (c *captureSink) frames() [][]byte {
 	return out
 }
 
+// waitFor polls cond until it is true or a deadline elapses. It replaces fixed
+// time.Sleep barriers, which are racy under loaded or race-enabled CI: instead of
+// guessing how long a flush takes, the tests wait on the batcher's own flush
+// counters, which advance only after a real Sink.Flush.
+func waitFor(t *testing.T, cond func() bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
 // TestDecodeRawFrames feeds real non-delta frames through Decode and checks that
 // the header parses and the CRC verifies.
 func TestDecodeRawFrames(t *testing.T) {
@@ -70,7 +86,7 @@ func TestDecodeRawFrames(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		b.Push(sample{ID: uint32(i), Price: float64(i) * 2.5})
 	}
-	time.Sleep(30 * time.Millisecond)
+	waitFor(t, func() bool { return b.FlushedItems() >= 5 }, "5 items flushed")
 	cancel()
 	<-done
 
@@ -108,7 +124,7 @@ func TestDecodeCRCMismatch(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := b.Start(ctx)
 	b.Push(sample{ID: 1, Price: 1.0})
-	time.Sleep(30 * time.Millisecond)
+	waitFor(t, func() bool { return b.FlushedItems() >= 1 }, "1 item flushed")
 	cancel()
 	<-done
 
@@ -142,14 +158,16 @@ func TestDeltaReconstruction(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := b.Start(ctx)
 
-	// Push one item at a time with a gap so each lands in its own flush, producing
-	// a deterministic sequence of single-item frames.
+	// Push one item at a time, waiting for each to be flushed before pushing the
+	// next, so every item lands in its own frame. This makes the keyframe/delta mix
+	// deterministic (frame 1 is a keyframe, frame 2 onward are deltas) without any
+	// fixed sleeps.
 	const nFrames = 7
 	for i := 0; i < nFrames; i++ {
 		b.Push(sample{ID: uint32(i), Price: float64(i) * 1.25})
-		time.Sleep(6 * time.Millisecond)
+		want := uint64(i + 1)
+		waitFor(t, func() bool { return b.FlushedBatches() >= want }, "each item flushed to its own frame")
 	}
-	time.Sleep(20 * time.Millisecond)
 	cancel()
 	<-done
 
@@ -161,6 +179,7 @@ func TestDeltaReconstruction(t *testing.T) {
 	var d codec.DeltaReconstructor
 	sawKeyframe, sawDelta := false, false
 	var decodedItems int
+	var firstDelta []byte
 	for i, f := range frames {
 		raw, h, err := d.Reconstruct(f)
 		if err != nil {
@@ -170,6 +189,9 @@ func TestDeltaReconstruction(t *testing.T) {
 			sawKeyframe = true
 		} else {
 			sawDelta = true
+			if firstDelta == nil {
+				firstDelta = f
+			}
 		}
 		body := raw[8:]
 		if int(h.Count)*itemSize != len(body) {
@@ -185,5 +207,14 @@ func TestDeltaReconstruction(t *testing.T) {
 	}
 	if decodedItems == 0 {
 		t.Error("expected to decode at least one item")
+	}
+
+	// Mid-stream join: a fresh reconstructor with no baseline must reject a delta
+	// frame via CRC rather than emit corrupt data (see SPEC.md, "Mid-stream joins").
+	if firstDelta != nil {
+		var fresh codec.DeltaReconstructor
+		if _, _, err := fresh.Reconstruct(firstDelta); err != codec.ErrCRCMismatch {
+			t.Errorf("mid-stream join on a delta frame: got err %v, want ErrCRCMismatch", err)
+		}
 	}
 }
