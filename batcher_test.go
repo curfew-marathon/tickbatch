@@ -1081,13 +1081,15 @@ func TestQueueDepth(t *testing.T) {
 // and the engine shuts down cleanly.
 func TestFlushTimeout(t *testing.T) {
 	t.Parallel()
+	release := make(chan struct{})
+	defer close(release) // unblock the timeout-abandoned flush goroutine on test exit
 	itemSize := int(unsafe.Sizeof(MarketTick{}))
 	b := New[MarketTick](Config{
 		QueueSize:    64,
 		MaxBatchSize: headerSize + itemSize*64,
 		MaxItemSize:  itemSize,
 		TickRate:     100,
-		Sink:         &hangSink{},
+		Sink:         &hangSink{release: release},
 		FlushTimeout: 20 * time.Millisecond,
 		OnFlushError: func(error) {},
 	})

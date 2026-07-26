@@ -303,19 +303,20 @@ Every component is designed for production instrumentation. The following zero-a
 | Method | Description |
 |---|---|
 | `QueueDepth()` | Best-effort snapshot of items currently in the ring buffer. |
-| `QueueCap()` | Ring buffer capacity (equals `Config.QueueSize` rounded to next power of two). |
+| `QueueCap()` | Ring buffer capacity (`Config.QueueSize` must be a positive power of two; `New` panics otherwise). |
 | `CoalescedTicks()` | Drain cycles skipped because a flush overran the tick interval. |
 
 `FlushedItems() / FlushedBatches()` gives the average batch fill rate. `DroppedCount() + EvictedCount()` gives cumulative data loss across both backpressure policies. All counters are `atomic.Uint64`/`atomic.Int64` reads — zero allocations, safe to call from any goroutine at any time.
 
 **Leading-indicator alerts** (fire before loss begins):
 
-```
+```text
 # Ring saturation — page before DropNewest/DropOldest activates
 QueueDepth() / QueueCap() > 0.8
 
 # Sink stalled or partitioned — primary MTTR clock
-time.Since(b.LastFlushAt()) > 5*time.Second
+# Guard the zero value: LastFlushAt() is zero until the first successful flush.
+!b.LastFlushAt().IsZero() && time.Since(b.LastFlushAt()) > 5*time.Second
 ```
 
 ---

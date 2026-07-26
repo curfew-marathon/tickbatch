@@ -22,14 +22,14 @@ This runbook covers the two failure modes that produce data loss in a tickbatch 
 
 ## Failure mode A — Sink stalled (tarpit / network partition)
 
-**Symptom:** `EvictedCount` or `DroppedCount` is climbing **and** `time.Since(LastFlushAt())` exceeds your threshold. `FlushErrorCount` may be rising too (if `Config.FlushTimeout` is set).
+**Symptom:** `EvictedCount` or `DroppedCount` is climbing **and** `time.Since(b.LastFlushAt())` exceeds your threshold. `FlushErrorCount` may be rising too (if `Config.FlushTimeout` is set).
 
-**What is happening:** The drain goroutine is blocked inside `Sink.Flush`. Without a `FlushTimeout`, a single slow or partitioned sink can park the sole drain goroutine indefinitely — the ring fills, loss begins, and no metric moves until `DroppedCount`/`EvictedCount` are read directly.
+**What is happening:** The drain goroutine is blocked inside `Sink.Flush`. Meanwhile, producers continue running and can keep incrementing `DroppedCount` and `EvictedCount` independently — these counters are not paused by a stalled drain. Without a `FlushTimeout`, a partitioned sink can park the sole drain goroutine indefinitely.
 
 **Steps:**
 
-1. Check `time.Since(b.LastFlushAt())`. If it exceeds your SLO, the sink has not delivered since that timestamp — all ring churn since then is undelivered.
-2. Check `FlushErrorCount()`. If it is rising, flushes are timing out (`FlushTimeout` is set and expiring). If it is zero and `LastFlushAt` is stale, the sink is blocking without returning an error — no `FlushTimeout` is configured.
+1. Check `b.LastFlushAt()`. If it is zero, no successful flush has ever occurred — this may be a startup misconfiguration (wrong address, authentication failure) rather than a mid-run partition. If it is non-zero but stale beyond your SLO, the sink stopped delivering at that timestamp.
+2. Check `FlushErrorCount()`. If it is rising, flushes are timing out (`FlushTimeout` is set and expiring). If it is zero and `b.LastFlushAt()` is stale, the sink is blocking without returning an error — no `FlushTimeout` is configured.
 3. Check `CoalescedTicks()`. A large value confirms the drain goroutine has been running behind the tick rate for an extended period.
 4. Remediate the downstream: fail over the endpoint, restart the stuck connection, or route to a fallback sink.
 5. If `Config.FlushTimeout` is not set, set it. Without it, a hung sink parks the drain goroutine for the duration of the OS-level I/O timeout (potentially minutes), which maximises ring loss.
@@ -59,12 +59,12 @@ This runbook covers the two failure modes that produce data loss in a tickbatch 
 
 ## Alert thresholds (suggested starting points)
 
-```
+```text
 # Leading indicator — page before any loss occurs
 QueueDepth() / QueueCap() > 0.8  for 30s
 
-# MTTR clock — sink stalled
-time.Since(b.LastFlushAt()) > 5s
+# MTTR clock — sink stalled (guard zero: LastFlushAt is zero until first success)
+!b.LastFlushAt().IsZero() && time.Since(b.LastFlushAt()) > 5s
 
 # Loss already occurring
 DroppedCount() + EvictedCount()  rate > 0  for 10s
@@ -73,4 +73,4 @@ DroppedCount() + EvictedCount()  rate > 0  for 10s
 CoalescedTicks()  rate > 0  for 60s
 ```
 
-Tune these thresholds against your `Config.TickRate` and `Config.QueueSize`. A `QueueSize` of 1024 at 60 Hz gives ~17 s of headroom at the drain rate before loss; a `QueueSize` of 64 at 1 Hz gives ~64 s of headroom but with much coarser delivery granularity.
+Tune these thresholds to your deployment. The `QueueSize / TickRate` ratio is an illustrative one-item-per-tick estimate only — in practice each drain cycle flushes multiple items and `Sink.Flush` latency can reduce throughput below the configured rate. Use measured net arrival-minus-drain rates from `FlushedItems` vs. your ingest counter to size `QueueSize` for real burst profiles.

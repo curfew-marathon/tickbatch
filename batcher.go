@@ -126,6 +126,7 @@ type Batcher[T Serializable] struct {
 	previousState  []byte
 	deltaBuffer    []byte
 	compressBuffer []byte
+	timeoutBuf     []byte // snapshot buffer for timed-out flushes; nil when FlushTimeout == 0
 	ring           *ringbuf[T]
 	cfg            Config
 	started        atomic.Bool
@@ -136,8 +137,8 @@ type Batcher[T Serializable] struct {
 	_       [56]byte // 8 (dropped) + 56 = 64 bytes: one full cache line
 
 	// Consumer-written exclusively by the background flush goroutine. Grouped
-	// together — no cross-thread writes within this group. The block is exactly
-	// 64 bytes (one cache line): 4+4+8+8+8+8+8+8+8 = 64.
+	// together — no cross-thread writes within this group. The block spans exactly
+	// 128 bytes (two cache lines): 4+4+8+8+8+8+8+8+8+4+60 = 128.
 	sequenceID     atomic.Uint32
 	_              [4]byte // align next uint64
 	truncated      atomic.Uint64
@@ -147,6 +148,8 @@ type Batcher[T Serializable] struct {
 	bytesFlushed   atomic.Uint64
 	lastFlushAt    atomic.Int64 // unix nanos; 0 = never flushed
 	coalescedTicks atomic.Uint64
+	flushInFlight  atomic.Bool     // serializes Sink.Flush when FlushTimeout is set
+	_              [60]byte        // pad to 128 bytes: two full cache lines
 }
 
 // New allocates and returns a ready-to-use Batcher.
@@ -189,6 +192,9 @@ func New[T Serializable](cfg Config) *Batcher[T] {
 	}
 	if cfg.Compressor != nil {
 		b.compressBuffer = make([]byte, cfg.MaxBatchSize)
+	}
+	if cfg.FlushTimeout > 0 {
+		b.timeoutBuf = make([]byte, cfg.MaxBatchSize)
 	}
 	return b
 }
@@ -285,19 +291,20 @@ func (b *Batcher[T]) QueueDepth() uint64 {
 	return 0
 }
 
-// QueueCap returns the ring buffer capacity as set by [Config.QueueSize]
-// (rounded up to the next power of two by [New]).
+// QueueCap returns the ring buffer capacity as set by [Config.QueueSize].
+// [New] panics if QueueSize is not already a positive power of two.
 func (b *Batcher[T]) QueueCap() uint64 {
 	return b.ring.mask + 1
 }
 
 // CoalescedTicks returns the number of drain cycles that were skipped because a
-// Sink.Flush call overran the configured tick interval. The count is computed
-// arithmetically (floor(flush_duration/tick_interval) - 1) rather than from the
-// ticker channel depth, which silently caps at 1 regardless of actual slippage.
+// full drain cycle (serialization, compression, and Sink.Flush) overran the
+// configured tick interval. The count is computed arithmetically
+// (floor(drain_duration/tick_interval) - 1) rather than from the ticker channel
+// depth, which silently caps at 1 regardless of actual slippage.
 // A rising value means the engine is draining slower than [Config.TickRate];
-// consider lowering [Config.FlushTimeout] to fail fast, or raising
-// [Config.TickRate] to match the sink's sustained throughput.
+// consider lowering [Config.TickRate] to reduce the tick interval pressure, or
+// setting [Config.FlushTimeout] to bound how long a single Sink.Flush may block.
 func (b *Batcher[T]) CoalescedTicks() uint64 {
 	return b.coalescedTicks.Load()
 }
@@ -326,17 +333,29 @@ func (b *Batcher[T]) Start(ctx context.Context) <-chan struct{} {
 
 // flushWithTimeout calls Sink.Flush, optionally bounding it with a deadline.
 // If [Config.FlushTimeout] is zero, the call is direct and allocation-free.
-// If non-zero, Flush runs in a one-shot goroutine (allocation acceptable — this
-// is the consumer path, not the zero-alloc Push hot path). On timeout,
-// [ErrFlushTimeout] is returned immediately; the goroutine may still be running
-// until the OS unblocks the underlying I/O, but the buffered channel ensures it
-// can always write its result and garbage collect without blocking.
+// If non-zero:
+//   - flushInFlight serializes concurrent calls: if a previous flush is still
+//     running (timed-out but not yet returned), [ErrFlushTimeout] is returned
+//     immediately rather than stacking a second concurrent Sink.Flush.
+//   - payload is copied into the pre-allocated timeoutBuf before the goroutine
+//     launches, so the drain loop may freely overwrite byteBuffer/deltaBuffer/
+//     compressBuffer without racing the abandoned goroutine.
+//   - The buffered result channel guarantees the goroutine can always write its
+//     result and GC cleanly, even if this call has already returned on timeout.
 func (b *Batcher[T]) flushWithTimeout(payload []byte) error {
 	if b.cfg.FlushTimeout == 0 {
 		return b.cfg.Sink.Flush(payload)
 	}
+	if !b.flushInFlight.CompareAndSwap(false, true) {
+		return ErrFlushTimeout
+	}
+	n := copy(b.timeoutBuf, payload)
+	snapshot := b.timeoutBuf[:n]
 	ch := make(chan error, 1)
-	go func() { ch <- b.cfg.Sink.Flush(payload) }()
+	go func() {
+		ch <- b.cfg.Sink.Flush(snapshot)
+		b.flushInFlight.Store(false)
+	}()
 	t := time.NewTimer(b.cfg.FlushTimeout)
 	defer t.Stop()
 	select {
