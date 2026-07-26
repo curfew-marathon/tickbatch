@@ -3,6 +3,7 @@ package tickbatch
 import (
 	"bytes"
 	"context"
+	"os/exec"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -965,6 +966,26 @@ func TestEvictedCount(t *testing.T) {
 	}
 	if got := b.DroppedCount(); got != 0 {
 		t.Errorf("DroppedCount: got %d, want 0 (DropOldest must not increment DroppedCount)", got)
+	}
+}
+
+// TestPaddedSeqSize asserts that paddedSeq occupies exactly one 64-byte cache line.
+// If this fails, the parallel-array false-sharing fix is broken — two adjacent sequence
+// numbers would share a cache line and reintroduce MESI coherence storms under MPMC fan-in.
+func TestPaddedSeqSize(t *testing.T) {
+	if got := unsafe.Sizeof(paddedSeq{}); got != 64 {
+		t.Fatalf("paddedSeq size = %d bytes, want 64 (one full cache line)", got)
+	}
+}
+
+// TestPushInlines verifies that the (*ringbuf).push method stays within the
+// compiler's inline budget. If push falls off the inlining cliff, every Push call
+// introduces a function-call overhead on the hot path and the zero-allocation
+// contract is at risk.
+func TestPushInlines(t *testing.T) {
+	out, _ := exec.Command("go", "build", "-gcflags=-m", "./...").CombinedOutput()
+	if bytes.Contains(out, []byte("cannot inline (*ringbuf")) {
+		t.Fatalf("ring push fell off the inlining cliff:\n%s", out)
 	}
 }
 
