@@ -64,7 +64,7 @@ type Config struct {
 
 	// TickRate is the number of drain cycles executed per second.
 	// A value of 60 causes the engine to wake and flush the queue 60 times per second.
-	// It must be positive when [Batcher.Start] is called.
+	// Must be in the range [1, 1_000_000_000]; [New] panics if either bound is violated.
 	TickRate int
 
 	// Backpressure selects the policy applied when Push is called on a full queue.
@@ -147,6 +147,9 @@ func New[T Serializable](cfg Config) *Batcher[T] {
 	if cfg.TickRate <= 0 {
 		panic("tickbatch: Config.TickRate must be positive")
 	}
+	if cfg.TickRate > 1_000_000_000 {
+		panic("tickbatch: Config.TickRate must not exceed 1_000_000_000 (1 GHz; interval would round to zero)")
+	}
 	if cfg.DeltaEncoding && cfg.Sink != nil {
 		if _, ok := cfg.Sink.(ReliableSink); !ok {
 			panic("tickbatch: DeltaEncoding requires a ReliableSink; UDPSink and other fire-and-forget sinks are incompatible")
@@ -198,7 +201,8 @@ func (b *Batcher[T]) EvictedCount() uint64 {
 
 // TruncatedCount returns the number of items that were dequeued by the drain loop
 // but discarded because their Marshal method returned zero bytes. A non-zero value
-// indicates a bug in the T.Marshal implementation.
+// indicates either a bug in T.Marshal or a [Config.MaxItemSize] that is smaller than
+// the actual encoded size of T.
 func (b *Batcher[T]) TruncatedCount() uint64 {
 	return b.truncated.Load()
 }
@@ -209,7 +213,7 @@ func (b *Batcher[T]) FlushedBatches() uint64 {
 }
 
 // FlushedItems returns the total number of items serialized and delivered across
-// all flushes. Dividing by [FlushedBatches] gives the average batch fill rate.
+// all flushes. Dividing by [Batcher.FlushedBatches] gives the average batch fill rate.
 func (b *Batcher[T]) FlushedItems() uint64 {
 	return b.flushedItems.Load()
 }
@@ -262,8 +266,6 @@ func (b *Batcher[T]) drainAndFlush(prevOffset *int) {
 	if n == 0 || b.cfg.Sink == nil {
 		return
 	}
-	b.flushedBatches.Add(1)
-	b.flushedItems.Add(uint64(n))
 
 	seq := b.sequenceID.Add(1)
 	b.byteBuffer[0] = byte(seq)
@@ -305,6 +307,9 @@ func (b *Batcher[T]) drainAndFlush(prevOffset *int) {
 			} else {
 				log.Printf("tickbatch: %v", err)
 			}
+		} else {
+			b.flushedBatches.Add(1)
+			b.flushedItems.Add(uint64(n))
 		}
 		return
 	}
@@ -344,6 +349,8 @@ func (b *Batcher[T]) drainAndFlush(prevOffset *int) {
 			clear(b.previousState[offset:*prevOffset])
 		}
 		*prevOffset = offset
+		b.flushedBatches.Add(1)
+		b.flushedItems.Add(uint64(n))
 	}
 }
 

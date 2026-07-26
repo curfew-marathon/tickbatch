@@ -302,6 +302,17 @@ func TestNewPanicsOnNonPositiveTickRate(t *testing.T) {
 	New[MarketTick](Config{QueueSize: 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12})
 }
 
+// TestNewPanicsOnExcessiveTickRate verifies that New panics when Config.TickRate
+// exceeds 1_000_000_000, which would cause time.NewTicker to receive a zero duration.
+func TestNewPanicsOnExcessiveTickRate(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("New with TickRate=1_000_000_001 did not panic")
+		}
+	}()
+	New[MarketTick](Config{QueueSize: 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 1_000_000_001})
+}
+
 // TestStartPanicsOnDoubleStart verifies that calling Start a second time panics,
 // preventing two drain goroutines from racing on the shared byteBuffer.
 func TestStartPanicsOnDoubleStart(t *testing.T) {

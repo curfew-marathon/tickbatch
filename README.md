@@ -166,7 +166,8 @@ func main() {
     b := tickbatch.New[RiskSnapshot](tickbatch.Config{
         QueueSize:    1 << 12, // 4096 slots, must be a power of two
         MaxBatchSize: 64 * 1024,
-        TickRate:     100,             // drain and flush 100 times per second
+        MaxItemSize:  int(unsafe.Sizeof(RiskSnapshot{})),
+        TickRate:     100, // drain and flush 100 times per second
         Sink:         ComplianceSink{},
     })
 
@@ -257,8 +258,8 @@ Every component is designed for production instrumentation. The following zero-a
 |---|---|
 | `DroppedCount()` | Items discarded because the ring was full under `DropNewest`. |
 | `EvictedCount()` | Items evicted from the ring head under `DropOldest`. |
-| `TruncatedCount()` | Items dequeued but discarded because `Marshal` returned zero bytes — indicates a bug in `T.Marshal`. |
-| `FlushedBatches()` | Total batches delivered to `Sink.Flush`. |
+| `TruncatedCount()` | Items dequeued but discarded because `Marshal` returned zero bytes — indicates a bug in `T.Marshal` or a `MaxItemSize` configured smaller than the actual encoded size. |
+| `FlushedBatches()` | Total batches successfully delivered to `Sink.Flush`. |
 | `FlushedItems()` | Total items serialized across all flushes. |
 
 `FlushedItems() / FlushedBatches()` gives the average batch fill rate. `DroppedCount() + EvictedCount()` gives cumulative data loss across both backpressure policies. All counters are `atomic.Uint64` reads — zero allocations, safe to call from any goroutine at any time.
