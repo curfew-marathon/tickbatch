@@ -5,6 +5,31 @@ import (
 	"unsafe"
 )
 
+// testXORPanic asserts that XORBytes panics with the deliberate bounds-check
+// message for the given inputs. Matching the exact string ensures a native
+// runtime index-out-of-range panic (which would occur if the guard were removed)
+// does not silently satisfy the assertion.
+func testXORPanic(t *testing.T, dst, a, b []byte) {
+	t.Helper()
+	const wantMsg = "tickbatch: XORBytes: dst and b must each be at least len(a) bytes"
+	defer func() {
+		r := recover()
+		got, ok := r.(string)
+		if !ok || got != wantMsg {
+			t.Errorf("XORBytes: unexpected panic value %#v (dst=%d a=%d b=%d)", r, len(dst), len(a), len(b))
+		}
+	}()
+	XORBytes(dst, a, b)
+}
+
+// TestXORBytesPanicGuard verifies that XORBytes panics when dst or b is shorter
+// than a. The fuzz corpus always passes equal-length slices, so without this
+// explicit test a refactor that removes the guard would pass undetected.
+func TestXORBytesPanicGuard(t *testing.T) {
+	testXORPanic(t, []byte("abcde"), []byte("abc"), []byte("ab"))   // len(b) < len(a)
+	testXORPanic(t, []byte("ab"), []byte("abcde"), []byte("abcde")) // len(dst) < len(a)
+}
+
 // FuzzXORBytes stress-tests the vectorized XOR engine against random byte slice
 // lengths, exercising both the 8-byte word loop and the len%8 tail-byte fallback.
 // It asserts that the output is correct and that XORing twice recovers the original.

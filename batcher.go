@@ -2,17 +2,24 @@ package tickbatch
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"log"
 	"math"
 	"sync/atomic"
 	"time"
+	"unsafe"
 )
 
 // headerSize is the byte length of the fixed header prepended to every flushed batch.
 // Layout: bytes [0:4] sequence ID (uint32, little-endian), [4:6] item count (uint16,
-// little-endian), [6:8] reserved and zeroed.
+// little-endian), [6:8] integrity tag (uint16, little-endian): bit 15 signals a keyframe
+// (full-frame baseline reset for delta-encoding receivers), bits 0-14 carry the low 15 bits
+// of CRC-32/IEEE over the raw payload body (bytes [8:N]). An empty body causes an early
+// return before this tag is written, so receivers never observe a tag for an empty frame.
+// The sequence ID is a uint32 that wraps to zero after 2^32-1 batches; no epoch or MAC is provided.
 const headerSize = 8
 
 // BackpressurePolicy controls what happens when [Batcher.Push] is called on a full ring buffer.
@@ -110,6 +117,15 @@ type Config struct {
 	// corrupt output. Sink must implement [ReliableSink] when DeltaEncoding is true;
 	// [New] panics otherwise.
 	DeltaEncoding bool
+
+	// KeyframeInterval, when non-zero and DeltaEncoding is true, emits a full
+	// un-XORed payload every KeyframeInterval successful flushes. Keyframe batches
+	// set bit 15 of the header integrity tag so receivers know to reset their delta
+	// baseline. This bounds error propagation: a receiver that detects a bad CRC can
+	// wait for the next keyframe rather than accumulating permanent drift.
+	// A value of 1 effectively disables delta compression (every frame is a keyframe).
+	// Ignored when DeltaEncoding is false.
+	KeyframeInterval uint32
 }
 
 // ErrFlushTimeout is passed to [Config.OnFlushError] when a Sink.Flush call
@@ -164,6 +180,13 @@ func New[T Serializable](cfg Config) *Batcher[T] {
 	if cfg.Backpressure != DropNewest && cfg.Backpressure != DropOldest {
 		panic("tickbatch: Config.Backpressure is not a valid BackpressurePolicy")
 	}
+	if cfg.MaxItemSize == 0 {
+		// Default to the compile-time size of T. Valid for flat, pointer-free
+		// structs (the enforced Serializable contract); unsafe.Sizeof does not
+		// evaluate its argument, so no allocation occurs.
+		var zero T
+		cfg.MaxItemSize = int(unsafe.Sizeof(zero))
+	}
 	if cfg.MaxItemSize <= 0 {
 		panic("tickbatch: Config.MaxItemSize must be positive")
 	}
@@ -205,17 +228,22 @@ func New[T Serializable](cfg Config) *Batcher[T] {
 // allocations. If the buffer is full, the configured [BackpressurePolicy] is
 // applied — the caller is never stalled or panicked (graceful degradation contract).
 // Under [DropNewest], the incoming item is silently discarded and [Batcher.DroppedCount]
-// is incremented. Under [DropOldest], the oldest queued item is evicted and the
-// new item always succeeds; DroppedCount is never incremented.
+// is incremented. Under [DropOldest], the oldest queued item is normally evicted and
+// the new item always succeeds; in the rare case where eviction retries are exhausted
+// because a stalled producer holds the head slot, Push degrades to DropNewest and
+// DroppedCount is incremented.
 func (b *Batcher[T]) Push(item T) {
 	if !b.ring.push(item, b.cfg.Backpressure) {
 		b.dropped.Add(1)
 	}
 }
 
-// DroppedCount returns the cumulative number of items silently discarded because
-// the ring buffer was full under the [DropNewest] policy. It is always zero when
-// using [DropOldest], which evicts the oldest item rather than dropping the new one.
+// DroppedCount returns the cumulative number of items discarded because the ring
+// buffer was full. Under [DropNewest] this occurs on every overflowing Push.
+// Under [DropOldest] it is normally zero; it becomes non-zero only when the
+// eviction spin exceeds its retry cap because a stalled producer has claimed
+// the head slot but not yet published its sequence number, and Push degrades
+// to DropNewest to preserve the non-blocking guarantee.
 func (b *Batcher[T]) DroppedCount() uint64 {
 	return b.dropped.Load()
 }
@@ -368,10 +396,11 @@ func (b *Batcher[T]) flushWithTimeout(payload []byte) error {
 
 // drainAndFlush dequeues all available items from the ring buffer, serializes
 // them into the pre-allocated byteBuffer, and delivers the payload to the
-// configured Sink. The prevOffset argument tracks the previous frame's byte
-// length for delta-encoding stale-byte zeroing. It performs zero heap
+// configured Sink. PrevOffset tracks the previous frame's byte length for
+// delta-encoding stale-byte zeroing; keyframeN tracks position within the
+// keyframe cycle when [Config.KeyframeInterval] is set. It performs zero heap
 // allocations.
-func (b *Batcher[T]) drainAndFlush(prevOffset *int) {
+func (b *Batcher[T]) drainAndFlush(prevOffset *int, keyframeN *uint32) {
 	offset := headerSize
 	n := 0
 	for n < math.MaxUint16 {
@@ -405,8 +434,18 @@ func (b *Batcher[T]) drainAndFlush(prevOffset *int) {
 	count := uint16(n)
 	b.byteBuffer[4] = byte(count)
 	b.byteBuffer[5] = byte(count >> 8)
-	b.byteBuffer[6] = 0
-	b.byteBuffer[7] = 0
+
+	// Integrity tag [6:8]: low 15 bits of CRC-32/IEEE over the raw payload body
+	// so receivers can detect frame corruption and delta desync. Bit 15 signals a
+	// keyframe (delta-encoding receivers reset their baseline on this flag).
+	// CRC is computed over the raw body before any XOR transform so receivers
+	// verify the reconstructed payload after reversing the delta.
+	isKeyframe := b.cfg.DeltaEncoding && b.cfg.KeyframeInterval > 0 && *keyframeN == 0
+	crc16 := uint16(crc32.ChecksumIEEE(b.byteBuffer[8:offset]) & 0x7fff)
+	if isKeyframe {
+		crc16 |= 0x8000
+	}
+	binary.LittleEndian.PutUint16(b.byteBuffer[6:8], crc16)
 
 	if !b.cfg.DeltaEncoding {
 		payload := b.byteBuffer[:offset]
@@ -447,8 +486,17 @@ func (b *Batcher[T]) drainAndFlush(prevOffset *int) {
 		return
 	}
 
-	XORBytes(b.deltaBuffer[:offset], b.byteBuffer[:offset], b.previousState[:offset])
-	payload := b.deltaBuffer[:offset]
+	// Keyframe: send the raw frame so receivers can reset their delta baseline.
+	// Normal delta: XOR the full buffer (header + body) against previousState.
+	// XORing the header ensures the CRC and flags are also differentially encoded,
+	// and the receiver recovers the correct header by reversing the XOR.
+	var payload []byte
+	if isKeyframe {
+		payload = b.byteBuffer[:offset]
+	} else {
+		XORBytes(b.deltaBuffer[:offset], b.byteBuffer[:offset], b.previousState[:offset])
+		payload = b.deltaBuffer[:offset]
+	}
 	if b.cfg.Compressor != nil {
 		cn, cerr := b.cfg.Compressor.Compress(b.compressBuffer, payload)
 		if cerr != nil {
@@ -487,6 +535,12 @@ func (b *Batcher[T]) drainAndFlush(prevOffset *int) {
 		b.flushedItems.Add(uint64(n))
 		b.bytesFlushed.Add(uint64(len(payload)))
 		b.lastFlushAt.Store(time.Now().UnixNano())
+		if b.cfg.KeyframeInterval > 0 {
+			(*keyframeN)++
+			if *keyframeN >= b.cfg.KeyframeInterval {
+				*keyframeN = 0
+			}
+		}
 	}
 }
 
@@ -500,6 +554,7 @@ func (b *Batcher[T]) runLoop(ctx context.Context) {
 	defer ticker.Stop()
 
 	var prevOffset int
+	var keyframeN uint32
 
 	for {
 		select {
@@ -507,7 +562,7 @@ func (b *Batcher[T]) runLoop(ctx context.Context) {
 			if b.cfg.ShutdownTimeout > 0 {
 				ch := make(chan struct{})
 				go func() {
-					b.drainAndFlush(&prevOffset)
+					b.drainAndFlush(&prevOffset, &keyframeN)
 					close(ch)
 				}()
 				timer := time.NewTimer(b.cfg.ShutdownTimeout)
@@ -523,12 +578,12 @@ func (b *Batcher[T]) runLoop(ctx context.Context) {
 					}
 				}
 			} else {
-				b.drainAndFlush(&prevOffset)
+				b.drainAndFlush(&prevOffset, &keyframeN)
 			}
 			return
 		case <-ticker.C:
 			tickStart := time.Now()
-			b.drainAndFlush(&prevOffset)
+			b.drainAndFlush(&prevOffset, &keyframeN)
 			// Measure true tick slippage arithmetically rather than via len(ticker.C).
 			// Go's ticker channel has depth 1 and silently drops overflowed ticks, so
 			// a 500ms flush against a 10ms tick interval would count as 1 missed tick
