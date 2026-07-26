@@ -32,11 +32,11 @@ Testing in this repository is heavily focused on concurrency safety and memory p
 
 - **Linting:**
   `golangci-lint config verify && golangci-lint run`
-  *Config:* `.golangci.yml` controls all linting behaviour. Always run `config verify` first - the CI action runs it as a strict preflight and will fail on schema errors that `run` silently ignores.
+  *Config:* `.golangci.yml` controls all linting behavior. Always run `config verify` first - the CI action runs it as a strict preflight and will fail on schema errors that `run` silently ignores.
   *Enabled linters (beyond the standard set):* `gocritic`, `godot`, `revive`, `misspell`, `prealloc`, `unconvert`, `wastedassign`.
   *Intentional suppressions - do not remove:*
   - `gosec` unsafe warnings: `unsafe` is mandated by this project (see §1).
-  - `revive` unused-parameter on `ringbuf.go`: the `_ [64]byte` padding fields are intentional false-sharing guards, not dead code.
+  - `revive` unused-parameter on `ringbuf.go`: the `_ [56]byte` padding fields are intentional false-sharing guards, not dead code.
 
 ## Code Style & Conventions
 - **Generics Constraint:** ALWAYS use the generic constraint `[T Serializable]` for payload ingestion. Do not use `[T any]`. This ensures the compiler enforces our zero-allocation byte-packing contract.

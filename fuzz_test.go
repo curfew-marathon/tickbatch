@@ -5,7 +5,7 @@ import (
 	"unsafe"
 )
 
-// testXORPanic asserts that XORBytes panics with the deliberate bounds-check
+// testXORPanic asserts that xorBytes panics with the deliberate bounds-check
 // message for the given inputs. Matching the exact string ensures a native
 // runtime index-out-of-range panic (which would occur if the guard were removed)
 // does not silently satisfy the assertion.
@@ -16,13 +16,13 @@ func testXORPanic(t *testing.T, dst, a, b []byte) {
 		r := recover()
 		got, ok := r.(string)
 		if !ok || got != wantMsg {
-			t.Errorf("XORBytes: unexpected panic value %#v (dst=%d a=%d b=%d)", r, len(dst), len(a), len(b))
+			t.Errorf("xorBytes: unexpected panic value %#v (dst=%d a=%d b=%d)", r, len(dst), len(a), len(b))
 		}
 	}()
 	xorBytes(dst, a, b)
 }
 
-// TestXORBytesPanicGuard verifies that XORBytes panics when dst or b is shorter
+// TestXORBytesPanicGuard verifies that xorBytes panics when dst or b is shorter
 // than a. The fuzz corpus always passes equal-length slices, so without this
 // explicit test a refactor that removes the guard would pass undetected.
 func TestXORBytesPanicGuard(t *testing.T) {

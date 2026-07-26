@@ -9,7 +9,7 @@ To push Go's performance to the absolute limit, this project aggressively avoids
 - [x] Define the `Serializable` interface (`Marshal(buf []byte) int`). Document strictly that implementors must use **pointer-free** flat structs to guarantee O(1) GC scan times.
 - [x] Define `Config` and the core `Batcher[T Serializable]` struct. 
 - [x] Implement `ringbuf[T Serializable]` using atomic pointers. 
-- [x] **Hardware Optimization:** Inject Cache-Line Padding (`[64]byte`) between the read and write pointers in the `ringbuf` struct to physically separate them in the CPU cache, completely eliminating False Sharing.
+- [x] **Hardware Optimization:** Inject Cache-Line Padding (`[56]byte`, sizing each 8-byte pointer to a full 64-byte line) between the read and write pointers in the `ringbuf` struct to physically separate them in the CPU cache, completely eliminating False Sharing.
 - [x] Implement `Batcher.Push(item T)`.
 - [x] **Testable Deliverable:** A unit test proving data can be pushed and popped sequentially.
 - [x] **Performance Gate:** `go test -bench=. -benchmem` must guarantee `0 allocs/op` on `Push()`.
@@ -25,7 +25,7 @@ To push Go's performance to the absolute limit, this project aggressively avoids
 ## Phase 3: Bare-Metal Serialization (The Bytes)
 **Goal:** Utilize the `Serializable` interface and `unsafe` to pack the pre-allocated buffers at C-level speeds.
 - [x] Add `popMarshal` to `ringbuf`: marshals each item directly from its ring slot into `byteBuffer`, eliminating the intermediate `drainSlice` (ring slot → byteBuffer in one step).
-- [x] Implement 8-byte payload header: `[0:4]` uint32 sequence ID, `[4:6]` uint16 item count (both little-endian via byte-shifting), `[6:8]` reserved.
+- [x] Implement 8-byte payload header: `[0:4]` uint32 sequence ID, `[4:6]` uint16 item count (both little-endian via byte-shifting), `[6:8]` integrity tag (bit 15 keyframe flag, bits 0-14 low 15 bits of CRC-32/IEEE over the body).
 - [x] **Hardware Optimization:** `Tick.Marshal` uses `unsafe.Pointer` field-level casts (`*(*float64)(unsafe.Pointer(&buf[8]))`) to bypass `encoding/binary`.
 - [x] **Testable Deliverable:** `TestTickSerialization` asserts exact payload byte length, header sequence ID, header item count, and full field-level data integrity of the decoded first `Tick`.
 
@@ -62,11 +62,13 @@ To push Go's performance to the absolute limit, this project aggressively avoids
 - [x] **CI Pipeline (`.github/workflows/ci.yml`):** Trigger on push to `main` and `pull_request`. Run `go test -v -race ./...` across a build matrix of `ubuntu-latest` (amd64), `macos-latest` (arm64), and `windows-latest` (amd64) to catch unsafe-cast regressions on all three targets.
 - [x] **Lint Step:** Run `golangci-lint config verify && golangci-lint run` via `golangci/golangci-lint-action` to enforce all project style and correctness rules.
 - [x] **Zero-Allocation Memory Gate:** Run `go test -bench=BenchmarkPush -benchmem ./... > bench.txt`, then parse `bench.txt` with `grep`/`awk` and exit 1 if `allocs/op > 0`. Mathematically prevents any PR from introducing a heap escape on the hot path.
-- [x] **Runnable Example (`examples/telemetry_ingest/main.go`):** A fully functional demonstration that dials `UDPSink` to `127.0.0.1:9999`, pushes `RiskEvent` structs in a hot loop for 3 seconds with `DeltaEncoding: true`, then blocks on the `done` channel to prove graceful shutdown.
+- [x] **Runnable Example (`examples/telemetry_ingest/main.go`):** A fully functional demonstration that dials `UDPSink` to `127.0.0.1:9999`, pushes `RiskEvent` structs in a hot loop for 3 seconds under `DropOldest` backpressure, then blocks on the `done` channel to prove graceful shutdown. (No delta encoding: `UDPSink` is fire-and-forget, not a `ReliableSink`, so `New` rejects pairing it with `DeltaEncoding`.)
 - [x] **Testable Deliverable:** `go run ./examples/telemetry_ingest/` exits cleanly after 3 seconds, printing the total dropped count. CI gates prevent any allocation regression from merging.
 
 ## Phase 9: Enterprise Hardening & Bleeding-Edge Optimization
 **Goal:** Bulletproof the `unsafe` memory boundaries, eliminate OS scheduler jitter, and leverage modern Go compiler advancements for absolute maximum throughput.
+
+> **Status:** Phase 9 items are post-v1.0 stretch goals, intentionally deferred - they do not gate the v1.0 release. Shipped fuzzing coverage lives in Phase 7 (`FuzzXORBytes` in `fuzz_test.go`).
 - [ ] **Native Fuzzing (`testing.F`):** Implement `FuzzTickSerialization` in `batcher_test.go`. Pump millions of randomly mutated byte slices and struct bounds into the `Marshal` and `Push` functions to mathematically prove the `unsafe` pointer arithmetic cannot trigger a segfault under hostile or malformed ingest conditions.
 - [ ] **Hardware Affinity (`runtime.LockOSThread`):** Add a `LockThread bool` to `Config`. When enabled, the `runLoop` immediately locks itself to the underlying OS thread, preventing the Go scheduler from migrating the goroutine across CPU cores. This guarantees the L1/L2 hardware caches remain perfectly hot during the batching cycle.
 - [ ] **Profile-Guided Optimization (PGO):** Run a sustained `pprof` CPU profile against the stress benchmarks to generate a `default.pgo` file. Commit this profile to the repository so the Go compiler automatically aggressively inlines `push`, `popMarshal`, and the `unsafe` casting paths for all future builds.

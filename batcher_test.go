@@ -456,7 +456,7 @@ func TestNewPanicsOnInvalidBackpressurePolicy(t *testing.T) {
 
 // OrderBookState is a flat, pointer-free struct with a 35-byte wire
 // representation (non-multiple-of-8 length: 32 word-aligned bytes + 3 tail
-// bytes) that exercises the [XORBytes] tail-byte fallback path.
+// bytes) that exercises the xorBytes tail-byte fallback path.
 type OrderBookState struct {
 	// BidPrice is the best bid price in the order book.
 	BidPrice float64
@@ -474,7 +474,7 @@ type OrderBookState struct {
 
 // Marshal implements [Serializable] by writing 35 bytes into buf: 8+8+4+4+4+7.
 // The wire size of 35 is not a multiple of 8, which stresses the tail-byte
-// fallback loop in [XORBytes].
+// fallback loop in xorBytes.
 func (o OrderBookState) Marshal(buf []byte) int {
 	const size = 35
 	if len(buf) < size {
@@ -489,7 +489,7 @@ func (o OrderBookState) Marshal(buf []byte) int {
 	return size
 }
 
-// TestXORBytesCorrectness verifies that [XORBytes] produces the correct bitwise
+// TestXORBytesCorrectness verifies that xorBytes produces the correct bitwise
 // XOR of two 35-byte buffers (32 bytes processed as uint64 words + 3 tail bytes
 // via the fallback loop) and that the operation is self-inverse: applying XOR
 // with the same second operand twice recovers the original first operand.
