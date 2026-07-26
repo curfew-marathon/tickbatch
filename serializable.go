@@ -1,4 +1,3 @@
-// Package tickbatch is a lock-free, zero-allocation telemetry batching engine.
 package tickbatch
 
 // Serializable is the contract for all payload types ingested by a [Batcher].

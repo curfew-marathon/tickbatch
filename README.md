@@ -232,13 +232,13 @@ The ring buffer uses Dmitry Vyukov's sequence-based MPMC algorithm. Each slot ca
 
 ### Cache-Line Isolation
 
-The head and tail cursors are separated by 64 bytes of padding inside the `ringbuf` struct:
+The head and tail cursors are each placed on their own 64-byte cache line inside the `ringbuf` struct:
 
-```
+```go
 head atomic.Uint64
-_    [64]byte        // isolates head from tail on a separate cache line
+_    [56]byte        // pads head (8 B) to a full 64-byte cache line, isolating it from tail
 tail atomic.Uint64
-_    [64]byte        // isolates tail from subsequent fields
+_    [56]byte        // pads tail (8 B) to a full 64-byte cache line, isolating it from subsequent fields
 ```
 
 On a modern NUMA or multi-socket system, without this padding, a write to `tail` by a producer invalidates the cache line holding `head` on every consumer core. The result is a coherence storm that can collapse throughput by an order of magnitude. The padding places each cursor on its own 64-byte cache line, making producer and consumer operations fully independent at the hardware level.
@@ -262,7 +262,7 @@ Every payload delivered to `Sink.Flush` uses the following fixed layout:
 ```
 Bytes [0:4]  - sequence ID, little-endian uint32 (monotonically increasing per Batcher)
 Bytes [4:6]  - item count, little-endian uint16
-Bytes [6:8]  - reserved, always zero
+Bytes [6:8]  - integrity tag, little-endian uint16: bit 15 = keyframe flag, bits 0-14 = low 15 bits of CRC-32/IEEE over the body [8:N]
 Bytes [8:N]  - packed items, each written by T.Marshal() back-to-back with no separator
 ```
 
@@ -274,11 +274,11 @@ When `Config.DeltaEncoding` is true, the payload delivered to `Sink.Flush` is th
 
 tickbatch provides **at-most-once delivery** and **producer isolation** - not end-to-end reliability.
 
-The zero-allocation guarantee applies to the ingest path: `Push` through the ring buffer and the drain serializer into the pre-allocated byte buffer. The `Sink.Flush` boundary is user-owned territory. What happens after `Flush` returns - retries, acknowledgements, dead-letter queues - is the caller's responsibility.
+The zero-allocation guarantee applies to the ingest path: `Push` through the ring buffer and the drain serializer into the pre-allocated byte buffer. The `Sink.Flush` boundary is user-owned territory. What happens after `Flush` returns - retries, acknowledgments, dead-letter queues - is the caller's responsibility.
 
-**Slow sink = silent data loss.** When `Config.FlushTimeout` is zero (the default), `Sink.Flush` is called synchronously on the drain goroutine. A blocking flush holds the drain goroutine, the ring fills, and `Push` begins silently dropping items under `DropNewest` or evicting old items under `DropOldest`. When `Config.FlushTimeout` is non-zero, the flush runs in a background goroutine and the drain loop resumes after the timeout -- the ring is no longer blocked, but the timed-out batch is abandoned and not retried. Either way, slow or partitioned sinks cause data loss: `FlushTimeout` trades a blocked ring for discarded batches rather than dropped pushes. Use `FlushErrorCount()` + `LastFlushAt()` to detect a stalled or partitioned sink before the loss becomes significant.
+**Slow sink = silent data loss.** When `Config.FlushTimeout` is zero (the default), `Sink.Flush` is called synchronously on the drain goroutine. A blocking flush holds the drain goroutine, the ring fills, and `Push` begins silently dropping items under `DropNewest` or evicting old items under `DropOldest`. When `Config.FlushTimeout` is non-zero, the flush runs in a background goroutine and the drain loop resumes after the timeout - the ring is no longer blocked, but the timed-out batch is abandoned and not retried. Either way, slow or partitioned sinks cause data loss: `FlushTimeout` trades a blocked ring for discarded batches rather than dropped pushes. Use `FlushErrorCount()` + `LastFlushAt()` to detect a stalled or partitioned sink before the loss becomes significant.
 
-**Async broker clients must copy the payload.** Kafka producers, gRPC streams, and any driver that enqueues the slice and returns before transmitting will read from a buffer that the engine has already overwritten. Wrap the inner sink in `CopyingSink` to isolate the payload with one allocation per batch on the drain goroutine -- never on the producer's hot path.
+**Async broker clients must copy the payload.** Kafka producers, gRPC streams, and any driver that enqueues the slice and returns before transmitting will read from a buffer that the engine has already overwritten. Wrap the inner sink in `CopyingSink` to isolate the payload with one allocation per batch on the drain goroutine - never on the producer's hot path.
 
 ```go
 // KafkaSink is an example async broker adapter. The CopyingSink wrapper

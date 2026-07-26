@@ -57,14 +57,14 @@ linters:
           - gosec
         text: "use of unsafe"
 
-      # Padding fields ("_ [64]byte") are intentional false-sharing guards —
+      # Padding fields ("_ [56]byte") are intentional false-sharing guards —
       # not dead code.
       - linters:
           - revive
         text: "unused-parameter"
         path: "ringbuf\\.go"
 
-      # The [64]byte padding in ringbuf and generic slot struct cause the
+      # The [56]byte padding in ringbuf and generic slot struct cause the
       # fieldalignment analyzer to report misleading suggestions; the padding
       # is a deliberate architectural choice to prevent false sharing.
       - linters:
