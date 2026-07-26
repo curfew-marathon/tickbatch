@@ -78,15 +78,23 @@ var (
 //	func TestMySink(t *testing.T) { tickbatchtest.TestSink(t, newMySink(t)) }
 //
 // It verifies the invariants observable through the Sink interface: Flush returns
-// promptly (no deadlock) for representative payloads, does not panic on empty or
-// nil payloads, tolerates repeated calls, and does not corrupt delivery when the
-// caller mutates the input buffer after Flush returns (the engine's buffer-reuse
-// contract). It cannot observe whether an opaque sink internally retains the slice,
-// so pair it with a transport-level round-trip test for full coverage.
+// promptly (no deadlock) for representative payloads under a context deadline, does
+// not panic on empty or nil payloads, tolerates repeated calls, and does not corrupt
+// delivery when the caller mutates the input buffer after Flush returns (the engine's
+// buffer-reuse contract). Each call passes a context carrying a deadline, so a sink
+// that honors ctx cancels cleanly. It cannot observe whether an opaque sink internally
+// retains the slice, so pair it with a transport-level round-trip test for full coverage.
 func TestSink(t testing.TB, s tickbatch.Sink) {
 	t.Helper()
 
 	call := func(name string, payload []byte) {
+		// Pass a per-call context carrying a 2s deadline so the conformance check
+		// exercises ctx propagation. A sink that honors ctx cancels within the
+		// deadline and its goroutine exits cleanly (no leak); a sink that ignores
+		// ctx is still caught by the outer 5s harness backstop, which fails the
+		// test rather than letting CI hang.
+		cctx, ccancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer ccancel()
 		done := make(chan error, 1)
 		go func() {
 			defer func() {
@@ -94,7 +102,7 @@ func TestSink(t testing.TB, s tickbatch.Sink) {
 					done <- errPanic{r}
 				}
 			}()
-			done <- s.Flush(context.Background(), payload)
+			done <- s.Flush(cctx, payload)
 		}()
 		select {
 		case err := <-done:

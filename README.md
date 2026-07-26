@@ -57,7 +57,7 @@ A background goroutine drains the ring at a fixed Hz, serializes directly into a
 - **Lock-Free MPMC Ring Buffer.** The Dmitry Vyukov sequence-based algorithm. No mutexes. Multiple producers, single consumer. Scales to any number of pushing goroutines.
 - **Cache-Line Padding.** The head and tail cursors are physically separated by 64 bytes of padding. They live on different CPU cache lines. False sharing between producer and consumer cores is structurally impossible.
 - **Bare-Metal `unsafe` Serialization.** The `Serializable` interface encodes your struct directly into a caller-supplied `[]byte` via `unsafe.Pointer` casting. No `encoding/binary`. No reflection. C-level throughput.
-- **Bring Your Own Transport.** The `Sink` interface is a single method: `Flush(payload []byte) error`. UDP, TCP, shared memory, Kafka: anything goes. Async broker clients that enqueue the payload and return before transmitting must copy the slice; use `CopyingSink` to handle this once rather than in every adapter.
+- **Bring Your Own Transport.** The `Sink` interface is a single method: `Flush(ctx context.Context, payload []byte) error`. UDP, TCP, shared memory, Kafka: anything goes. Async broker clients that enqueue the payload and return before transmitting must copy the slice; use `CopyingSink` to handle this once rather than in every adapter.
 - **Graceful Shutdown.** Canceling the context triggers a final drain: remaining ring-buffer items are serialized and flushed before the goroutine exits. No records are silently abandoned on shutdown.
 - **Pluggable Compression.** The optional `Compressor` interface lets you apply `zstd`, `lz4`, or any codec to each batch payload inside the pre-allocated compress buffer - zero additional allocations.
 - **Vectorized Delta Encoding.** Optional XOR-delta mode diffs each batch against the previous frame using 64-bit word-level vectorization via `unsafe.Slice`, then falls back to a byte-wise tail loop for non-8-byte-aligned payloads.
@@ -135,6 +135,7 @@ package main
 import (
     "context"
     "fmt"
+    "log"
     "time"
     "unsafe"
 
@@ -168,20 +169,25 @@ func (r RiskSnapshot) Marshal(buf []byte) int {
 // ComplianceSink forwards each flushed batch to the downstream audit store.
 type ComplianceSink struct{}
 
-func (s ComplianceSink) Flush(payload []byte) error {
+func (s ComplianceSink) Flush(_ context.Context, payload []byte) error {
     // Write payload to Kafka topic, S3, ClickHouse, durable UDP socket, etc.
+    // The ctx carries the FlushTimeout/ShutdownTimeout deadline; honor it for
+    // cancelable transports (for example net.Conn.SetWriteDeadline).
     fmt.Printf("flushed %d bytes\n", len(payload))
     return nil
 }
 
 func main() {
-    b := tickbatch.New[RiskSnapshot](tickbatch.Config{
+    b, err := tickbatch.New[RiskSnapshot](tickbatch.Config{
         QueueSize:    1 << 12, // 4096 slots, must be a power of two
         MaxBatchSize: 64 * 1024,
         MaxItemSize:  int(unsafe.Sizeof(RiskSnapshot{})),
         TickRate:     100, // drain and flush 100 times per second
         Sink:         ComplianceSink{},
     })
+    if err != nil {
+        log.Fatal(err) // or use tickbatch.MustNew for the panic-on-error variant
+    }
 
     ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
     defer cancel()
@@ -280,7 +286,7 @@ The zero-allocation guarantee applies to the ingest path: `Push` through the rin
 // broker has transmitted the frame.
 type KafkaSink struct{ producer *kafka.Writer }
 
-func (k KafkaSink) Flush(payload []byte) error { /* enqueue payload */ return nil }
+func (k KafkaSink) Flush(_ context.Context, payload []byte) error { /* enqueue payload */ return nil }
 
 sink := tickbatch.CopyingSink{Inner: KafkaSink{producer: w}}
 ```
