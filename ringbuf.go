@@ -93,6 +93,11 @@ func (r *ringbuf[T]) push(item T, policy BackpressurePolicy) bool {
 				return true
 			}
 			// Another producer won the CAS; retry from the new tail.
+			// Note: this CAS-retry loop is intentionally unbounded. A CAS failure
+			// means another producer made global progress (advanced tail), so the
+			// system as a whole is not stuck. This is the lock-free, not wait-free,
+			// contract. Capping this retry with evictAttempts would discard items
+			// that are legitimately in-flight and break linearizability.
 			continue
 		}
 
@@ -106,6 +111,10 @@ func (r *ringbuf[T]) push(item T, policy BackpressurePolicy) bool {
 			// path so its node weight is not charged against push's inline
 			// budget, preserving the compiler's ability to inline push itself.
 			// Bound the spin so a stalled producer cannot cause livelock.
+			// The diff > 0 path below is similarly unbounded by design: that
+			// case also implies another producer made progress, so it is not a
+			// livelock. Only the eviction path (where evictOldest may be a
+			// repeated no-op) is genuinely at risk of spinning without progress.
 			if evictAttempts++; evictAttempts > maxEvictRetries {
 				return false
 			}

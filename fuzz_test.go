@@ -5,13 +5,18 @@ import (
 	"unsafe"
 )
 
-// testXORPanic asserts that XORBytes panics for the given inputs.
-// Uses stdlib recover so testify is not required.
+// testXORPanic asserts that XORBytes panics with the deliberate bounds-check
+// message for the given inputs. Matching the exact string ensures a native
+// runtime index-out-of-range panic (which would occur if the guard were removed)
+// does not silently satisfy the assertion.
 func testXORPanic(t *testing.T, dst, a, b []byte) {
 	t.Helper()
+	const wantMsg = "tickbatch: XORBytes: dst and b must each be at least len(a) bytes"
 	defer func() {
-		if r := recover(); r == nil {
-			t.Errorf("XORBytes did not panic with mismatched lengths (dst=%d a=%d b=%d)", len(dst), len(a), len(b))
+		r := recover()
+		got, ok := r.(string)
+		if !ok || got != wantMsg {
+			t.Errorf("XORBytes: unexpected panic value %#v (dst=%d a=%d b=%d)", r, len(dst), len(a), len(b))
 		}
 	}()
 	XORBytes(dst, a, b)

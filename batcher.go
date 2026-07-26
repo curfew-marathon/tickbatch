@@ -17,7 +17,8 @@ import (
 // Layout: bytes [0:4] sequence ID (uint32, little-endian), [4:6] item count (uint16,
 // little-endian), [6:8] integrity tag (uint16, little-endian): bit 15 signals a keyframe
 // (full-frame baseline reset for delta-encoding receivers), bits 0-14 carry the low 15 bits
-// of CRC-32/IEEE over the raw payload body (bytes [8:N]). A zero tag means the body is empty.
+// of CRC-32/IEEE over the raw payload body (bytes [8:N]). An empty body causes an early
+// return before this tag is written, so receivers never observe a tag for an empty frame.
 // The sequence ID is a uint32 that wraps to zero after 2^32-1 batches; no epoch or MAC is provided.
 const headerSize = 8
 
@@ -227,8 +228,10 @@ func New[T Serializable](cfg Config) *Batcher[T] {
 // allocations. If the buffer is full, the configured [BackpressurePolicy] is
 // applied — the caller is never stalled or panicked (graceful degradation contract).
 // Under [DropNewest], the incoming item is silently discarded and [Batcher.DroppedCount]
-// is incremented. Under [DropOldest], the oldest queued item is evicted and the
-// new item always succeeds; DroppedCount is never incremented.
+// is incremented. Under [DropOldest], the oldest queued item is normally evicted and
+// the new item always succeeds; in the rare case where eviction retries are exhausted
+// because a stalled producer holds the head slot, Push degrades to DropNewest and
+// DroppedCount is incremented.
 func (b *Batcher[T]) Push(item T) {
 	if !b.ring.push(item, b.cfg.Backpressure) {
 		b.dropped.Add(1)
@@ -438,7 +441,7 @@ func (b *Batcher[T]) drainAndFlush(prevOffset *int, keyframeN *uint32) {
 	// CRC is computed over the raw body before any XOR transform so receivers
 	// verify the reconstructed payload after reversing the delta.
 	isKeyframe := b.cfg.DeltaEncoding && b.cfg.KeyframeInterval > 0 && *keyframeN == 0
-	crc16 := uint16(crc32.ChecksumIEEE(b.byteBuffer[8:offset]))
+	crc16 := uint16(crc32.ChecksumIEEE(b.byteBuffer[8:offset]) & 0x7fff)
 	if isKeyframe {
 		crc16 |= 0x8000
 	}
@@ -533,7 +536,7 @@ func (b *Batcher[T]) drainAndFlush(prevOffset *int, keyframeN *uint32) {
 		b.bytesFlushed.Add(uint64(len(payload)))
 		b.lastFlushAt.Store(time.Now().UnixNano())
 		if b.cfg.KeyframeInterval > 0 {
-			*keyframeN++
+			(*keyframeN)++
 			if *keyframeN >= b.cfg.KeyframeInterval {
 				*keyframeN = 0
 			}

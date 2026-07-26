@@ -10,21 +10,31 @@ package tickbatch
 //     buffer on every collection cycle, degrading throughput from O(1) to O(n).
 //     A flat struct guarantees O(1) GC scan time regardless of ring buffer capacity.
 //
-//   - Security: a Marshal that performs a raw memory copy (e.g. *(*T)(&buf[0]) = e)
-//     serializes the complete in-memory layout of the struct, including:
+//   - Security: a Marshal that performs a raw memory copy
+//     (e.g. *(*T)(unsafe.Pointer(&buf[0])) = e) serializes the complete in-memory
+//     layout of the struct, including:
 //     (a) inter-field padding bytes, which may contain stale stack or heap data
 //     (an information-leak analogous to the kernel copy_to_user padding class);
 //     (b) pointer and slice header words (address, len, cap), which transmit live
 //     heap addresses on the wire and can defeat ASLR.
 //
-// To prevent padding leaks, zero-initialize the struct before setting fields:
+// To reduce padding leak risk, prefer var-initialization before setting fields:
 //
-//	var e MyEvent          // all bytes including padding are zeroed
-//	e.Field = value
+//	var e MyEvent     // gc zeroes the backing store in practice, including padding
+//	e.Field = value   // but the Go spec does not guarantee padding bytes are zero
 //	batcher.Push(e)
 //
-// Assigning a composite literal (MyEvent{Field: value}) does not guarantee that
-// padding bytes between fields are zero.
+// The only portable, spec-guaranteed approach is to include explicit padding fields
+// in the struct definition (e.g. _ [6]byte) so the padding is a named zero-value
+// field rather than invisible compiler-inserted bytes:
+//
+//	type MyEvent struct {
+//	    Field  uint32
+//	    _      [4]byte // explicit padding: guaranteed zero by the struct's zero value
+//	}
+//
+// Composite literals (MyEvent{Field: value}) set named fields to their zero values
+// but do not guarantee compiler-inserted padding bytes between fields are zeroed.
 //
 // This is a caller contract, not a compile-time or runtime enforcement.
 //
