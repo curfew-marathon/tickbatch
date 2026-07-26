@@ -11,6 +11,10 @@
 # Test binary, built with `go test -c`
 *.test
 
+# Compiled example binaries (e.g. `go build ./examples/telemetry_ingest`)
+/telemetry_ingest
+/examples/**/telemetry_ingest
+
 # Code coverage profiles and other test artifacts
 *.out
 coverage.*

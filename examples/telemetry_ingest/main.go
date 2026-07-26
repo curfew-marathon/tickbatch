@@ -53,7 +53,7 @@ func main() {
 
 	flushErrs := make(chan error, 16)
 
-	b := tickbatch.New[RiskEvent](tickbatch.Config{
+	b, err := tickbatch.New[RiskEvent](tickbatch.Config{
 		Sink:         sink,
 		QueueSize:    1 << 14,
 		MaxBatchSize: 1 << 16,
@@ -67,6 +67,11 @@ func main() {
 			}
 		},
 	})
+	if err != nil {
+		// Return rather than log.Fatalf so the deferred sink.Close runs.
+		log.Printf("tickbatch: new batcher: %v", err)
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

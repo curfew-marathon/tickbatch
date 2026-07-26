@@ -28,7 +28,7 @@ type paddedSeq struct {
 //
 // The head and tail cursors are separated by 64 bytes of padding to place them
 // on distinct CPU cache lines. Without this, every write to tail invalidates the
-// cache line holding head on all other cores — a phenomenon called false sharing
+// cache line holding head on all other cores - a phenomenon called false sharing
 // that can collapse throughput by an order of magnitude.
 type ringbuf[T Serializable] struct {
 	head atomic.Uint64
@@ -130,7 +130,7 @@ func (r *ringbuf[T]) push(item T, policy BackpressurePolicy) bool {
 //
 // Guard: only evict a slot whose producer has already published (seq ==
 // headPos+1). If the head slot is still being written (producer won the tail
-// CAS but has not yet stored seq+1), we spin rather than recycle — otherwise a
+// CAS but has not yet stored seq+1), we spin rather than recycle - otherwise a
 // second producer could claim the same slot concurrently and race on the item
 // field.
 //

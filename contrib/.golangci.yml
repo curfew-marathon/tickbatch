@@ -1,0 +1,34 @@
+version: "2"
+
+# The contrib module deliberately takes third-party dependencies (Prometheus), so
+# it does NOT enable the core module's zero-dependency depguard rule. Style and
+# correctness linters are kept in sync with the root config.
+linters:
+  enable:
+    - gocritic
+    - godot
+    - revive
+    - misspell
+    - unconvert
+    - wastedassign
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+          severity: error
+          arguments:
+            - "checkPrivateReceivers"
+            - "sayRepetitiveInsteadOfStutters"
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+    godot:
+      scope: declarations
+      capital: true
+    misspell:
+      locale: US
+    govet:
+      enable:
+        - fieldalignment

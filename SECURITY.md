@@ -26,5 +26,5 @@ tickbatch is a pure-Go, zero-CGO library with no network listener or server comp
 attack surface is:
 
 - The `unsafe.Pointer` serialization path in `Serializable` implementations.
-- The `Sink.Flush` contract — callers must not retain the payload slice beyond the call.
+- The `Sink.Flush` contract - callers must not retain the payload slice beyond the call.
 - Delta encoding desync when `Config.DeltaEncoding` is enabled over an unreliable transport.

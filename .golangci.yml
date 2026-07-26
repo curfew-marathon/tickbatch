@@ -20,6 +20,7 @@ linters:
             - "!**/examples/**"
           allow:
             - $gostd   # strictly allow only the Go Standard Library
+            - github.com/curfew-marathon/tickbatch   # self-module: codec/ and tickbatchtest/ import the core; no third-party dep
         examples:
           files:
             - "**/examples/**"

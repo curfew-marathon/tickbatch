@@ -1,6 +1,10 @@
 package tickbatch
 
-import "net"
+import (
+	"context"
+	"net"
+	"time"
+)
 
 // UDPSink is a fire-and-forget [Sink] that transmits each flushed batch as a
 // single UDP datagram using the standard net package.
@@ -31,8 +35,13 @@ func NewUDPSink(addr string) (*UDPSink, error) {
 }
 
 // Flush transmits payload as a single UDP datagram and returns any write error.
-// Flush must not retain payload beyond the duration of the call.
-func (u *UDPSink) Flush(payload []byte) error {
+// Flush must not retain payload beyond the duration of the call. If ctx carries a
+// deadline it is applied to the socket write and cleared afterwards.
+func (u *UDPSink) Flush(ctx context.Context, payload []byte) error {
+	if dl, ok := ctx.Deadline(); ok {
+		_ = u.conn.SetWriteDeadline(dl)
+		defer func() { _ = u.conn.SetWriteDeadline(time.Time{}) }()
+	}
 	_, err := u.conn.Write(payload)
 	return err
 }

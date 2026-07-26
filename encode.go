@@ -2,7 +2,12 @@ package tickbatch
 
 import "unsafe"
 
-// XORBytes computes the bitwise XOR of a and b, writing each result byte into dst.
+// xorBytes computes the bitwise XOR of a and b, writing each result byte into dst.
+//
+// This is an internal delta-encoding primitive and is intentionally unexported: it
+// carries an unsafe uint64 word-cast with an alignment contract that must not become
+// part of the stable public API. The engine only ever calls it with buffers that
+// start at offset 0 of heap allocations (8-byte aligned), so the word-cast is safe.
 //
 // The length of dst and b must each be at least len(a); extra trailing bytes are ignored.
 // Passing shorter dst or b panics. The hot path reinterprets the backing arrays as
@@ -12,17 +17,13 @@ import "unsafe"
 // across 32 bytes rather than 8. A cleanup loop handles the remaining 1-3 words when
 // len(a)/8 is not a multiple of 4, followed by a byte-wise tail for the final
 // len(a)%8 bytes.
-//
-// Alignment note: on AArch64, plain LDR/STR instructions tolerate unaligned
-// addresses, so a subslice starting at a non-zero offset does not fault.
-// The minimum-length requirement above is the only hard contract callers must satisfy.
-func XORBytes(dst, a, b []byte) {
+func xorBytes(dst, a, b []byte) {
 	n := len(a)
 	if n == 0 {
 		return
 	}
 	if len(dst) < n || len(b) < n {
-		panic("tickbatch: XORBytes: dst and b must each be at least len(a) bytes")
+		panic("tickbatch: xorBytes: dst and b must each be at least len(a) bytes")
 	}
 	words := n / 8
 	if words > 0 {
