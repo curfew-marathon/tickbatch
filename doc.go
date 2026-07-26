@@ -1,8 +1,8 @@
 // Package tickbatch is a lock-free, zero-allocation telemetry batching engine for Go.
 //
 // tickbatch completely decouples event producers from downstream I/O. The producer
-// calls [Batcher.Push] — a single atomic compare-and-swap against a pre-allocated
-// ring buffer slot — and returns immediately. A background goroutine drains the ring
+// calls [Batcher.Push] - a single atomic compare-and-swap against a pre-allocated
+// ring buffer slot - and returns immediately. A background goroutine drains the ring
 // at a fixed Hz, serializes payloads directly into a pre-allocated byte buffer, and
 // hands each batch to a pluggable [Sink]. No heap activity ever occurs on the ingest
 // path. The GC has nothing to scan.
@@ -12,8 +12,8 @@
 // The internal ring buffer implements Dmitry Vyukov's sequence-based MPMC algorithm.
 // Each slot carries an atomic sequence number alongside the payload. Producers claim
 // slots via a compare-and-swap on the tail cursor; the single drain goroutine consumes
-// via the head cursor. The sequence number encodes slot state — empty, being written,
-// or ready to read — eliminating the ABA problem without a generation counter.
+// via the head cursor. The sequence number encodes slot state - empty, being written,
+// or ready to read - eliminating the ABA problem without a generation counter.
 //
 // The head and tail cursors are separated by 64 bytes of padding so they reside on
 // different CPU cache lines. This structural isolation eliminates producer/consumer
@@ -23,7 +23,7 @@
 //
 // Payload types must implement the [Serializable] interface, which encodes a value
 // into a caller-supplied []byte via a single Marshal call. The recommended pattern
-// uses unsafe.Pointer casting for a direct memory copy — no encoding/binary, no
+// uses unsafe.Pointer casting for a direct memory copy - no encoding/binary, no
 // reflection, no allocations. Flat, pointer-free structs guarantee O(1) GC scan time
 // regardless of ring buffer capacity; pointer fields cause the collector to scan every
 // slot on every cycle, degrading throughput from O(1) to O(n).

@@ -63,7 +63,7 @@ func TestStressTelemetry144Hz(t *testing.T) {
 	}
 
 	sink := &countingSink{}
-	b := New[OrderUpdate](Config{
+	b := MustNew[OrderUpdate](Config{
 		QueueSize:    queueSize,
 		MaxBatchSize: headerSize + queueSize*itemSize,
 		MaxItemSize:  itemSize,

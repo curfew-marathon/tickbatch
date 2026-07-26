@@ -1,10 +1,13 @@
 package tickbatch
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"net"
+	"time"
 )
 
 // TCPSink is a [ReliableSink] that transmits each flushed batch as a length-prefixed
@@ -47,8 +50,20 @@ func NewTCPSink(network, addr string) (*TCPSink, error) {
 // Flush transmits a 4-byte little-endian length prefix followed by payload using
 // a single vectorized write. On POSIX systems net.Buffers.WriteTo issues one
 // writev(2) syscall, sending both buffers without memory concatenation.
-// Flush must not retain payload beyond the duration of the call.
-func (t *TCPSink) Flush(payload []byte) error {
+// Flush must not retain payload beyond the duration of the call. If ctx carries a
+// deadline it is applied to the connection write and cleared afterwards, so a
+// stalled socket cannot park the drain goroutine past [Config.FlushTimeout].
+func (t *TCPSink) Flush(ctx context.Context, payload []byte) error {
+	if dl, ok := ctx.Deadline(); ok {
+		_ = t.conn.SetWriteDeadline(dl)
+		defer func() { _ = t.conn.SetWriteDeadline(time.Time{}) }()
+	}
+	// The length prefix is a uint32; a payload above 4 GiB would silently truncate
+	// modulo 2^32 and corrupt the framing of every subsequent frame on the stream.
+	// Reject it explicitly rather than emit an unparseable prefix.
+	if uint64(len(payload)) > math.MaxUint32 {
+		return fmt.Errorf("tickbatch: TCPSink payload %d bytes exceeds the 4 GiB length-prefix limit", len(payload))
+	}
 	binary.LittleEndian.PutUint32(t.lbuf[:], uint32(len(payload)))
 	bufs := net.Buffers{t.lbuf[:], payload}
 	n, err := bufs.WriteTo(t.conn)
@@ -61,7 +76,10 @@ func (t *TCPSink) Flush(payload []byte) error {
 	return nil
 }
 
-func (t *TCPSink) reliable() {}
+// Reliable marks TCPSink as a [ReliableSink]: net.Conn.Write blocks until the
+// kernel accepts the bytes, so a nil error means the payload was handed to the
+// transport.
+func (t *TCPSink) Reliable() {}
 
 // Close releases the underlying network connection. It must be called once the
 // associated [Batcher] has stopped to avoid leaking OS resources.

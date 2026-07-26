@@ -1,9 +1,11 @@
 package tickbatch
 
+import "context"
+
 // CopyingSink wraps any [Sink] and copies the payload into a fresh owned buffer
 // before calling the inner Flush. Use this when the inner Sink enqueues the slice
-// asynchronously — Kafka producers, gRPC streams, or any broker client that returns
-// before the bytes are transmitted — so the engine's buffer-reuse contract is satisfied.
+// asynchronously - Kafka producers, gRPC streams, or any broker client that returns
+// before the bytes are transmitted - so the engine's buffer-reuse contract is satisfied.
 //
 // The allocation cost of make([]byte, len(payload)) is incurred once per batch on
 // the drain goroutine, never on the producer's hot path.
@@ -13,11 +15,12 @@ type CopyingSink struct {
 
 // Flush copies payload into a fresh buffer and forwards it to the inner Sink.
 // The copy is performed before the inner call so the engine may freely reuse
-// the underlying buffer as soon as this method returns.
-func (c CopyingSink) Flush(payload []byte) error {
+// the underlying buffer as soon as this method returns. The ctx is forwarded
+// unchanged to the inner Sink.
+func (c CopyingSink) Flush(ctx context.Context, payload []byte) error {
 	cp := make([]byte, len(payload))
 	copy(cp, payload)
-	return c.Inner.Flush(cp)
+	return c.Inner.Flush(ctx, cp)
 }
 
 // ReliableCopyingSink is a [CopyingSink] variant that additionally implements
@@ -27,4 +30,6 @@ type ReliableCopyingSink struct {
 	CopyingSink
 }
 
-func (ReliableCopyingSink) reliable() {}
+// Reliable marks ReliableCopyingSink as a [ReliableSink]; callers assert the
+// wrapped inner Sink guarantees at-least-once delivery.
+func (ReliableCopyingSink) Reliable() {}

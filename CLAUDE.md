@@ -26,15 +26,15 @@ Testing in this repository is heavily focused on concurrency safety and memory p
 
 - **Memory & Allocation Benchmarks:**
   `go test -bench=. -benchmem ./...`
-  *Rule:* The `Push()` benchmark must register `0 B/op` and `0 allocs/op`. This is an automated CI gate — the Zero-Allocation Enforcer job parses benchmark output and fails the build on any `allocs/op > 0`. It is not just a guideline.
+  *Rule:* The `Push()` benchmark must register `0 B/op` and `0 allocs/op`. This is an automated CI gate - the Zero-Allocation Enforcer job parses benchmark output and fails the build on any `allocs/op > 0`. It is not just a guideline.
 
-- **CI Platform Matrix:** Tests run on all three targets — ubuntu-latest (amd64), macos-latest (arm64), windows-latest (amd64). Low-level `unsafe` operations and atomic alignment must be verified across architectures.
+- **CI Platform Matrix:** Tests run on all three targets - ubuntu-latest (amd64), macos-latest (arm64), windows-latest (amd64). Low-level `unsafe` operations and atomic alignment must be verified across architectures.
 
 - **Linting:**
   `golangci-lint config verify && golangci-lint run`
-  *Config:* `.golangci.yml` controls all linting behaviour. Always run `config verify` first — the CI action runs it as a strict preflight and will fail on schema errors that `run` silently ignores.
+  *Config:* `.golangci.yml` controls all linting behaviour. Always run `config verify` first - the CI action runs it as a strict preflight and will fail on schema errors that `run` silently ignores.
   *Enabled linters (beyond the standard set):* `gocritic`, `godot`, `revive`, `misspell`, `prealloc`, `unconvert`, `wastedassign`.
-  *Intentional suppressions — do not remove:*
+  *Intentional suppressions - do not remove:*
   - `gosec` unsafe warnings: `unsafe` is mandated by this project (see §1).
   - `revive` unused-parameter on `ringbuf.go`: the `_ [64]byte` padding fields are intentional false-sharing guards, not dead code.
 

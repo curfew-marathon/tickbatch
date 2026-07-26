@@ -9,10 +9,10 @@ all checks pass.
 # Race detector + all tests (mandatory)
 go test -v -race ./...
 
-# Zero-allocation enforcement — Push must show 0 allocs/op
+# Zero-allocation enforcement - Push must show 0 allocs/op
 go test -bench=. -benchmem ./...
 
-# Linter — config verify is a strict preflight; run it first
+# Linter - config verify is a strict preflight; run it first
 golangci-lint config verify && golangci-lint run
 ```
 

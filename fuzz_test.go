@@ -11,7 +11,7 @@ import (
 // does not silently satisfy the assertion.
 func testXORPanic(t *testing.T, dst, a, b []byte) {
 	t.Helper()
-	const wantMsg = "tickbatch: XORBytes: dst and b must each be at least len(a) bytes"
+	const wantMsg = "tickbatch: xorBytes: dst and b must each be at least len(a) bytes"
 	defer func() {
 		r := recover()
 		got, ok := r.(string)
@@ -19,7 +19,7 @@ func testXORPanic(t *testing.T, dst, a, b []byte) {
 			t.Errorf("XORBytes: unexpected panic value %#v (dst=%d a=%d b=%d)", r, len(dst), len(a), len(b))
 		}
 	}()
-	XORBytes(dst, a, b)
+	xorBytes(dst, a, b)
 }
 
 // TestXORBytesPanicGuard verifies that XORBytes panics when dst or b is shorter
@@ -59,7 +59,7 @@ func FuzzXORBytes(f *testing.F) {
 		}
 		dst := make([]byte, n)
 
-		XORBytes(dst, a, b)
+		xorBytes(dst, a, b)
 
 		for i := 0; i < n; i++ {
 			if want := a[i] ^ b[i]; dst[i] != want {
@@ -69,7 +69,7 @@ func FuzzXORBytes(f *testing.F) {
 
 		// Self-inverse: XOR(dst, b) must recover a exactly.
 		recovered := make([]byte, n)
-		XORBytes(recovered, dst, b)
+		xorBytes(recovered, dst, b)
 		for i := 0; i < n; i++ {
 			if recovered[i] != a[i] {
 				t.Fatalf("reversibility byte %d: got %02x, want %02x", i, recovered[i], a[i])

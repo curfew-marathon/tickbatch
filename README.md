@@ -1,8 +1,8 @@
-# tickbatch — zero-allocation, lock-free telemetry batching for Go
+# tickbatch - zero-allocation, lock-free telemetry batching for Go
 
 ## The zero-allocation, lock-free telemetry & compliance exhaust pipe for Go.
 
-Feed it a firehose of risk events, audit records, or market data telemetry. It absorbs everything lock-free into a pre-allocated ring buffer and drains to your transport at a rock-steady Hz — without ever touching the heap, blocking the producer, or coupling your hot thread to downstream I/O.
+Feed it a firehose of risk events, audit records, or market data telemetry. It absorbs everything lock-free into a pre-allocated ring buffer and drains to your transport at a rock-steady Hz - without ever touching the heap, blocking the producer, or coupling your hot thread to downstream I/O.
 
 [![Build Status](https://img.shields.io/github/actions/workflow/status/curfew-marathon/tickbatch/ci.yml?branch=main)](https://github.com/curfew-marathon/tickbatch/actions)
 [![Go Version](https://img.shields.io/badge/go-1.25%2B-00ADD8?logo=go)](https://go.dev)
@@ -15,7 +15,7 @@ Feed it a firehose of risk events, audit records, or market data telemetry. It a
 
 ## The Problem
 
-High-throughput Go services generate telemetry events — risk snapshots, audit log entries, compliance records, structured traces — at rates that make naive emission untenable.
+High-throughput Go services generate telemetry events - risk snapshots, audit log entries, compliance records, structured traces - at rates that make naive emission untenable.
 
 A risk engine emitting 50,000 position updates per second to a compliance bus. An order management system stamping every order lifecycle event to a durable audit store. A market data aggregator forwarding telemetry to a monitoring pipeline. They all share the same failure mode: the producer goroutine stalls waiting on a downstream write that is blocked on a full TCP buffer, a slow disk, or a GC pause triggered by the serialization layer.
 
@@ -43,7 +43,7 @@ tickbatch is a zero-impact exhaust pipe. It completely decouples the event produ
 
 **The producer never touches the network. The network never touches the producer.**
 
-The ingest path is a single atomic compare-and-swap against a pre-allocated ring buffer slot. No locks. No channels. No goroutine handoffs. No heap activity. If the buffer is full, the new item is silently dropped (or, when `DropOldest` is configured, the oldest item is evicted) — the caller is never stalled, never panicked, and never blocked behind a slow Kafka producer or a saturated UDP socket.
+The ingest path is a single atomic compare-and-swap against a pre-allocated ring buffer slot. No locks. No channels. No goroutine handoffs. No heap activity. If the buffer is full, the new item is silently dropped (or, when `DropOldest` is configured, the oldest item is evicted) - the caller is never stalled, never panicked, and never blocked behind a slow Kafka producer or a saturated UDP socket.
 
 A background goroutine drains the ring at a fixed Hz, serializes directly into a pre-allocated byte buffer via the `Serializable` interface, and hands the batch to your `Sink`. One function call to your transport. The GC has nothing to scan on the hot path.
 
@@ -57,9 +57,9 @@ A background goroutine drains the ring at a fixed Hz, serializes directly into a
 - **Lock-Free MPMC Ring Buffer.** The Dmitry Vyukov sequence-based algorithm. No mutexes. Multiple producers, single consumer. Scales to any number of pushing goroutines.
 - **Cache-Line Padding.** The head and tail cursors are physically separated by 64 bytes of padding. They live on different CPU cache lines. False sharing between producer and consumer cores is structurally impossible.
 - **Bare-Metal `unsafe` Serialization.** The `Serializable` interface encodes your struct directly into a caller-supplied `[]byte` via `unsafe.Pointer` casting. No `encoding/binary`. No reflection. C-level throughput.
-- **Bring Your Own Transport.** The `Sink` interface is a single method: `Flush(payload []byte) error`. UDP, TCP, shared memory, Kafka: anything goes. Async broker clients that enqueue the payload and return before transmitting must copy the slice; use `CopyingSink` to handle this once rather than in every adapter.
+- **Bring Your Own Transport.** The `Sink` interface is a single method: `Flush(ctx context.Context, payload []byte) error`. UDP, TCP, shared memory, Kafka: anything goes. Async broker clients that enqueue the payload and return before transmitting must copy the slice; use `CopyingSink` to handle this once rather than in every adapter.
 - **Graceful Shutdown.** Canceling the context triggers a final drain: remaining ring-buffer items are serialized and flushed before the goroutine exits. No records are silently abandoned on shutdown.
-- **Pluggable Compression.** The optional `Compressor` interface lets you apply `zstd`, `lz4`, or any codec to each batch payload inside the pre-allocated compress buffer — zero additional allocations.
+- **Pluggable Compression.** The optional `Compressor` interface lets you apply `zstd`, `lz4`, or any codec to each batch payload inside the pre-allocated compress buffer - zero additional allocations.
 - **Vectorized Delta Encoding.** Optional XOR-delta mode diffs each batch against the previous frame using 64-bit word-level vectorization via `unsafe.Slice`, then falls back to a byte-wise tail loop for non-8-byte-aligned payloads.
 - **Pure Go.** Zero CGO. Zero external dependencies. Cross-compiles to every GOOS/GOARCH without a C toolchain.
 
@@ -84,7 +84,7 @@ BenchmarkPush-8    93002511    12.44 ns/op    0 B/op    0 allocs/op
 
 **80 million pushes per second. Zero heap activity. Ever.**
 
-At 12.44 ns/op, the throughput is ~80M pushes/sec. The iteration count (93,002,511) reflects the total samples collected over the 30-second bench run — divide by the bench duration, not the iteration count, to get per-second throughput.
+At 12.44 ns/op, the throughput is ~80M pushes/sec. The iteration count (93,002,511) reflects the total samples collected over the 30-second bench run - divide by the bench duration, not the iteration count, to get per-second throughput.
 
 ### Stress Test (race detector enabled, 8 cores, 3 runs each)
 
@@ -135,6 +135,7 @@ package main
 import (
     "context"
     "fmt"
+    "log"
     "time"
     "unsafe"
 
@@ -168,20 +169,25 @@ func (r RiskSnapshot) Marshal(buf []byte) int {
 // ComplianceSink forwards each flushed batch to the downstream audit store.
 type ComplianceSink struct{}
 
-func (s ComplianceSink) Flush(payload []byte) error {
+func (s ComplianceSink) Flush(_ context.Context, payload []byte) error {
     // Write payload to Kafka topic, S3, ClickHouse, durable UDP socket, etc.
+    // The ctx carries the FlushTimeout/ShutdownTimeout deadline; honor it for
+    // cancelable transports (for example net.Conn.SetWriteDeadline).
     fmt.Printf("flushed %d bytes\n", len(payload))
     return nil
 }
 
 func main() {
-    b := tickbatch.New[RiskSnapshot](tickbatch.Config{
+    b, err := tickbatch.New[RiskSnapshot](tickbatch.Config{
         QueueSize:    1 << 12, // 4096 slots, must be a power of two
         MaxBatchSize: 64 * 1024,
         MaxItemSize:  int(unsafe.Sizeof(RiskSnapshot{})),
         TickRate:     100, // drain and flush 100 times per second
         Sink:         ComplianceSink{},
     })
+    if err != nil {
+        log.Fatal(err) // or use tickbatch.MustNew for the panic-on-error variant
+    }
 
     ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
     defer cancel()
@@ -193,7 +199,7 @@ func main() {
 
     // Push from any goroutine. Non-blocking. Zero allocations.
     // If the queue is full, the new item is silently dropped (or the oldest evicted
-    // when DropOldest is configured) — the producer is never stalled behind downstream I/O.
+    // when DropOldest is configured) - the producer is never stalled behind downstream I/O.
     // Synthetic firehose: real producers should pace with time.Ticker or event-driven pushes.
     go func() {
         for {
@@ -243,32 +249,32 @@ All cursor and sequence operations use `sync/atomic`. In Go's memory model, atom
 
 ### The Tick Engine
 
-`Start` spawns a single background goroutine running a `time.Ticker` at `Config.TickRate` Hz. On each tick, the drain loop calls `popMarshal` in a tight loop, atomically dequeuing each item and marshaling it directly into a pre-allocated `[]byte` buffer via the `Serializable` interface. When the buffer is full or the ring is empty, the loop stops and `Sink.Flush` is called with the accumulated payload. The byte buffer is sized at construction and never reallocated. When the context is canceled, a final drain executes before the goroutine exits — no records are silently abandoned.
+`Start` spawns a single background goroutine running a `time.Ticker` at `Config.TickRate` Hz. On each tick, the drain loop calls `popMarshal` in a tight loop, atomically dequeuing each item and marshaling it directly into a pre-allocated `[]byte` buffer via the `Serializable` interface. When the buffer is full or the ring is empty, the loop stops and `Sink.Flush` is called with the accumulated payload. The byte buffer is sized at construction and never reallocated. When the context is canceled, a final drain executes before the goroutine exits - no records are silently abandoned.
 
 ### Producer Isolation
 
-The critical design property is that `Sink.Flush` never executes on the producer's goroutine. The producer touches only the ring buffer (a single atomic CAS). The drain goroutine owns all serialization, compression, and network I/O. A 200 ms disk stall, a TCP backpressure event, or a slow Kafka broker never propagates back to the producer. The ring buffer absorbs the burst; backpressure is applied by silently dropping or evicting items — never by blocking the caller.
+The critical design property is that `Sink.Flush` never executes on the producer's goroutine. The producer touches only the ring buffer (a single atomic CAS). The drain goroutine owns all serialization, compression, and network I/O. A 200 ms disk stall, a TCP backpressure event, or a slow Kafka broker never propagates back to the producer. The ring buffer absorbs the burst; backpressure is applied by silently dropping or evicting items - never by blocking the caller.
 
 ### Wire Format
 
 Every payload delivered to `Sink.Flush` uses the following fixed layout:
 
 ```
-Bytes [0:4]  — sequence ID, little-endian uint32 (monotonically increasing per Batcher)
-Bytes [4:6]  — item count, little-endian uint16
-Bytes [6:8]  — reserved, always zero
-Bytes [8:N]  — packed items, each written by T.Marshal() back-to-back with no separator
+Bytes [0:4]  - sequence ID, little-endian uint32 (monotonically increasing per Batcher)
+Bytes [4:6]  - item count, little-endian uint16
+Bytes [6:8]  - reserved, always zero
+Bytes [8:N]  - packed items, each written by T.Marshal() back-to-back with no separator
 ```
 
 Header bytes [0:8] are explicit little-endian on all platforms. Body bytes [8:N] are native-endian: `T.Marshal` writes raw in-memory representations via `unsafe.Pointer`. A big-endian receiver must account for this asymmetry when decoding body fields; the header can always be decoded as little-endian.
 
-When `Config.DeltaEncoding` is true, the payload delivered to `Sink.Flush` is the XOR of the current raw frame against the previous raw frame. Receivers must maintain a copy of the prior raw frame and XOR it with each received frame to reconstruct the original batch. If a frame is lost in transit (e.g. over UDP), all subsequent frames produce corrupt output — only enable delta encoding over reliable transports.
+When `Config.DeltaEncoding` is true, the payload delivered to `Sink.Flush` is the XOR of the current raw frame against the previous raw frame. Receivers must maintain a copy of the prior raw frame and XOR it with each received frame to reconstruct the original batch. If a frame is lost in transit (e.g. over UDP), all subsequent frames produce corrupt output - only enable delta encoding over reliable transports.
 
 ### Delivery Semantics
 
-tickbatch provides **at-most-once delivery** and **producer isolation** — not end-to-end reliability.
+tickbatch provides **at-most-once delivery** and **producer isolation** - not end-to-end reliability.
 
-The zero-allocation guarantee applies to the ingest path: `Push` through the ring buffer and the drain serializer into the pre-allocated byte buffer. The `Sink.Flush` boundary is user-owned territory. What happens after `Flush` returns — retries, acknowledgements, dead-letter queues — is the caller's responsibility.
+The zero-allocation guarantee applies to the ingest path: `Push` through the ring buffer and the drain serializer into the pre-allocated byte buffer. The `Sink.Flush` boundary is user-owned territory. What happens after `Flush` returns - retries, acknowledgements, dead-letter queues - is the caller's responsibility.
 
 **Slow sink = silent data loss.** When `Config.FlushTimeout` is zero (the default), `Sink.Flush` is called synchronously on the drain goroutine. A blocking flush holds the drain goroutine, the ring fills, and `Push` begins silently dropping items under `DropNewest` or evicting old items under `DropOldest`. When `Config.FlushTimeout` is non-zero, the flush runs in a background goroutine and the drain loop resumes after the timeout -- the ring is no longer blocked, but the timed-out batch is abandoned and not retried. Either way, slow or partitioned sinks cause data loss: `FlushTimeout` trades a blocked ring for discarded batches rather than dropped pushes. Use `FlushErrorCount()` + `LastFlushAt()` to detect a stalled or partitioned sink before the loss becomes significant.
 
@@ -280,7 +286,7 @@ The zero-allocation guarantee applies to the ingest path: `Push` through the rin
 // broker has transmitted the frame.
 type KafkaSink struct{ producer *kafka.Writer }
 
-func (k KafkaSink) Flush(payload []byte) error { /* enqueue payload */ return nil }
+func (k KafkaSink) Flush(_ context.Context, payload []byte) error { /* enqueue payload */ return nil }
 
 sink := tickbatch.CopyingSink{Inner: KafkaSink{producer: w}}
 ```
@@ -291,7 +297,7 @@ sink := tickbatch.CopyingSink{Inner: KafkaSink{producer: w}}
 
 tickbatch bypasses `encoding/binary` and uses `unsafe.Pointer` arithmetic throughout the hot path. To validate these low-level invariants, the library ships two fuzzing harnesses:
 
-- **`FuzzXORBytes`** stress-tests the vectorized XOR engine — both the 8-byte word loop and the `len%8` tail-byte fallback — asserting that XOR-ing a payload twice recovers the original byte-for-byte. Exercises the alignment edge cases that are hardest to catch with hand-written unit tests.
+- **`FuzzXORBytes`** stress-tests the vectorized XOR engine - both the 8-byte word loop and the `len%8` tail-byte fallback - asserting that XOR-ing a payload twice recovers the original byte-for-byte. Exercises the alignment edge cases that are hardest to catch with hand-written unit tests.
 - **`FuzzTickSerialization`** stress-tests the `Marshal`/unmarshal round-trip with randomly generated field values including bit patterns that produce NaN floats, infinities, and denormals.
 
 To extend the corpus locally:
@@ -311,7 +317,7 @@ Every component is designed for production instrumentation. The following zero-a
 |---|---|
 | `DroppedCount()` | Items discarded because the ring was full under `DropNewest`. |
 | `EvictedCount()` | Items evicted from the ring head under `DropOldest`. |
-| `TruncatedCount()` | Items dequeued but discarded because `Marshal` returned zero bytes — indicates a bug in `T.Marshal` or a `MaxItemSize` configured smaller than the actual encoded size. |
+| `TruncatedCount()` | Items dequeued but discarded because `Marshal` returned zero bytes - indicates a bug in `T.Marshal` or a `MaxItemSize` configured smaller than the actual encoded size. |
 
 **Delivery counters**
 
@@ -331,15 +337,15 @@ Every component is designed for production instrumentation. The following zero-a
 | `QueueCap()` | Ring buffer capacity (`Config.QueueSize` must be a positive power of two; `New` panics otherwise). |
 | `CoalescedTicks()` | Drain cycles skipped because a flush overran the tick interval. |
 
-`FlushedItems() / FlushedBatches()` gives the average batch fill rate. `DroppedCount() + EvictedCount()` gives cumulative data loss across both backpressure policies. All counters are `atomic.Uint64`/`atomic.Int64` reads — zero allocations, safe to call from any goroutine at any time.
+`FlushedItems() / FlushedBatches()` gives the average batch fill rate. `DroppedCount() + EvictedCount()` gives cumulative data loss across both backpressure policies. All counters are `atomic.Uint64`/`atomic.Int64` reads - zero allocations, safe to call from any goroutine at any time.
 
 **Leading-indicator alerts** (fire before loss begins):
 
 ```text
-# Ring saturation — page before DropNewest/DropOldest activates
+# Ring saturation - page before DropNewest/DropOldest activates
 QueueDepth() / QueueCap() > 0.8
 
-# Sink stalled or partitioned — primary MTTR clock
+# Sink stalled or partitioned - primary MTTR clock
 # Guard the zero value: LastFlushAt() is zero until the first successful flush.
 !b.LastFlushAt().IsZero() && time.Since(b.LastFlushAt()) > 5*time.Second
 ```
@@ -350,13 +356,13 @@ QueueDepth() / QueueCap() > 0.8
 
 tickbatch is purpose-built for infrastructure where the producer thread must never stall behind downstream I/O.
 
-**Compliance & Audit Exhaust.** Risk engines, order management systems, and matching engines generate a continuous stream of lifecycle events that must be captured without imposing latency on the trading path. tickbatch provides a non-blocking ingest point that the hot thread pushes into at full speed. A separate drain goroutine delivers ordered, serialized records to durable storage — Kafka, S3, ClickHouse, or a UDP compliance bus — at a controlled rate. The producer never waits on a disk write or a network round-trip.
+**Compliance & Audit Exhaust.** Risk engines, order management systems, and matching engines generate a continuous stream of lifecycle events that must be captured without imposing latency on the trading path. tickbatch provides a non-blocking ingest point that the hot thread pushes into at full speed. A separate drain goroutine delivers ordered, serialized records to durable storage - Kafka, S3, ClickHouse, or a UDP compliance bus - at a controlled rate. The producer never waits on a disk write or a network round-trip.
 
 **Risk Telemetry Pipelines.** Portfolio risk systems emit position snapshots, Greeks, and margin utilization at high frequency. tickbatch absorbs burst spikes into a lock-free buffer and coalesces them into batched payloads before forwarding to downstream analytics. GC pauses in the serialization layer never interrupt the risk calculation loop.
 
 **Market Data Telemetry.** Quote and trade events from exchange feeds arrive in microsecond bursts. tickbatch ingests them lock-free and delivers coalesced payloads to monitoring pipelines, latency dashboards, and SRE alerting systems. The ingest goroutine is never coupled to the network write that delivers the telemetry.
 
-**Structured Event Logging.** High-throughput structured logs — request traces, latency samples, error events — can be ingested at any rate and forwarded to Kafka, Prometheus remote-write, or ClickHouse at a controlled Hz. Per-event serialization allocations are eliminated; the GC sees a flat heap.
+**Structured Event Logging.** High-throughput structured logs - request traces, latency samples, error events - can be ingested at any rate and forwarded to Kafka, Prometheus remote-write, or ClickHouse at a controlled Hz. Per-event serialization allocations are eliminated; the GC sees a flat heap.
 
 **UDP Unicast and Network Telemetry.** High-throughput UDP pipelines benefit directly from the zero-allocation ingest model. Push raw events from the ingest goroutine; receive a single coalesced payload in `Sink.Flush` ready for `conn.Write`. The built-in `UDPSink` uses connected unicast (`net.DialUDP`) and is designed for sidecar delivery to a co-located collector over loopback.
 

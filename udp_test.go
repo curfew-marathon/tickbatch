@@ -51,7 +51,7 @@ func TestUDPSinkIntegration(t *testing.T) {
 		}
 	})
 
-	b := New[OrderUpdate](Config{
+	b := MustNew[OrderUpdate](Config{
 		QueueSize:    16,
 		MaxBatchSize: headerSize + 16*itemSize,
 		MaxItemSize:  itemSize,

@@ -59,7 +59,7 @@ type countingSink struct {
 }
 
 // Flush increments the call counter and returns nil.
-func (c *countingSink) Flush(_ []byte) error {
+func (c *countingSink) Flush(_ context.Context, _ []byte) error {
 	c.count.Add(1)
 	return nil
 }
@@ -67,7 +67,7 @@ func (c *countingSink) Flush(_ []byte) error {
 // TestPushPop verifies the fundamental FIFO contract: a value pushed must be
 // the exact value returned on the next pop, with no corruption or reordering.
 func TestPushPop(t *testing.T) {
-	b := New[MarketTick](Config{QueueSize: 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 60})
+	b := MustNew[MarketTick](Config{QueueSize: 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 60})
 
 	ticks := []MarketTick{
 		{Price: 100.00, Volume: 0, Spread: 0},
@@ -91,7 +91,7 @@ func TestPushPop(t *testing.T) {
 // must silently drop items and never block or panic.
 func TestPushOnFullQueueDrops(t *testing.T) {
 	const size = 4
-	b := New[MarketTick](Config{QueueSize: size, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 60})
+	b := MustNew[MarketTick](Config{QueueSize: size, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 60})
 
 	filler := MarketTick{Price: 100.0}
 	for i := 0; i < size; i++ {
@@ -128,7 +128,7 @@ func TestRunLoop(t *testing.T) {
 	)
 
 	sink := &countingSink{}
-	b := New[QuoteSnapshot](Config{
+	b := MustNew[QuoteSnapshot](Config{
 		QueueSize:    1 << 10,
 		MaxBatchSize: 4096,
 		MaxItemSize:  16,
@@ -191,7 +191,7 @@ type captureSink struct {
 
 // Flush copies payload into a fresh slice and delivers it to the channel
 // non-blocking, preserving only the first batch if Flush is called multiple times.
-func (c *captureSink) Flush(payload []byte) error {
+func (c *captureSink) Flush(_ context.Context, payload []byte) error {
 	buf := make([]byte, len(payload))
 	copy(buf, payload)
 	select {
@@ -208,7 +208,7 @@ func TestTickSerialization(t *testing.T) {
 	const tickSize = 20 // packed wire size: 8 (Symbol) + 8 (Price) + 4 (Size)
 
 	sink := &captureSink{ch: make(chan []byte, 1)}
-	b := New[Tick](Config{
+	b := MustNew[Tick](Config{
 		QueueSize:    16,
 		MaxBatchSize: headerSize + 16*tickSize,
 		MaxItemSize:  tickSize,
@@ -279,7 +279,7 @@ func TestNewPanicsOnZeroQueueSize(t *testing.T) {
 			t.Error("New with QueueSize=0 did not panic")
 		}
 	}()
-	New[MarketTick](Config{QueueSize: 0, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 60})
+	MustNew[MarketTick](Config{QueueSize: 0, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 60})
 }
 
 // TestNewPanicsOnNonPowerOfTwoQueueSize verifies that New panics when QueueSize
@@ -290,7 +290,7 @@ func TestNewPanicsOnNonPowerOfTwoQueueSize(t *testing.T) {
 			t.Error("New with non-power-of-two QueueSize did not panic")
 		}
 	}()
-	New[MarketTick](Config{QueueSize: 3, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 60})
+	MustNew[MarketTick](Config{QueueSize: 3, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 60})
 }
 
 // TestNewPanicsOnNonPositiveTickRate verifies that New panics when
@@ -301,7 +301,7 @@ func TestNewPanicsOnNonPositiveTickRate(t *testing.T) {
 			t.Error("New with TickRate=0 did not panic")
 		}
 	}()
-	New[MarketTick](Config{QueueSize: 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12})
+	MustNew[MarketTick](Config{QueueSize: 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12})
 }
 
 // TestNewPanicsOnExcessiveTickRate verifies that New panics when Config.TickRate
@@ -312,13 +312,13 @@ func TestNewPanicsOnExcessiveTickRate(t *testing.T) {
 			t.Error("New with TickRate=1_000_000_001 did not panic")
 		}
 	}()
-	New[MarketTick](Config{QueueSize: 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 1_000_000_001})
+	MustNew[MarketTick](Config{QueueSize: 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 1_000_000_001})
 }
 
 // TestStartPanicsOnDoubleStart verifies that calling Start a second time panics,
 // preventing two drain goroutines from racing on the shared byteBuffer.
 func TestStartPanicsOnDoubleStart(t *testing.T) {
-	b := New[MarketTick](Config{
+	b := MustNew[MarketTick](Config{
 		QueueSize:    16,
 		MaxBatchSize: headerSize + 12,
 		MaxItemSize:  12,
@@ -345,7 +345,7 @@ func TestRunLoopBufferFull(t *testing.T) {
 	const tickSize = 20 // packed wire size: 8 (Symbol) + 8 (Price) + 4 (Size)
 
 	sink := &multiCaptureSink{ch: make(chan []byte, 4)}
-	b := New[Tick](Config{
+	b := MustNew[Tick](Config{
 		QueueSize:    16,
 		MaxBatchSize: headerSize + tickSize, // fits exactly one Tick per flush
 		MaxItemSize:  tickSize,
@@ -393,7 +393,7 @@ func TestRunLoopBufferFull(t *testing.T) {
 // TestStdoutSinkFlush verifies that StdoutSink.Flush writes without error.
 func TestStdoutSinkFlush(t *testing.T) {
 	s := StdoutSink{}
-	if err := s.Flush([]byte("test payload")); err != nil {
+	if err := s.Flush(context.Background(), []byte("test payload")); err != nil {
 		t.Errorf("StdoutSink.Flush returned unexpected error: %v", err)
 	}
 }
@@ -403,7 +403,7 @@ func TestStdoutSinkFlush(t *testing.T) {
 // new item, leaving all intermediate items intact and in FIFO order.
 func TestDropOldestEvictsOldestItem(t *testing.T) {
 	const size = 4
-	b := New[OrderUpdate](Config{
+	b := MustNew[OrderUpdate](Config{
 		QueueSize:    size,
 		MaxBatchSize: headerSize + 24,
 		MaxItemSize:  24,
@@ -433,7 +433,7 @@ func TestDropOldestEvictsOldestItem(t *testing.T) {
 		t.Fatalf("expected %d items after eviction, got %d", size, len(got))
 	}
 
-	// Order 1 must be absent; orders 2–5 must appear in FIFO order.
+	// Order 1 must be absent; orders 2-5 must appear in FIFO order.
 	want := []uint32{2, 3, 4, 5}
 	for i, item := range got {
 		if item.OrderID != want[i] {
@@ -451,7 +451,7 @@ func TestNewPanicsOnInvalidBackpressurePolicy(t *testing.T) {
 			t.Error("New with invalid BackpressurePolicy did not panic")
 		}
 	}()
-	New[OrderUpdate](Config{QueueSize: 16, MaxBatchSize: headerSize + 24, MaxItemSize: 24, Backpressure: BackpressurePolicy(99)})
+	MustNew[OrderUpdate](Config{QueueSize: 16, MaxBatchSize: headerSize + 24, MaxItemSize: 24, Backpressure: BackpressurePolicy(99)})
 }
 
 // OrderBookState is a flat, pointer-free struct with a 35-byte wire
@@ -519,7 +519,7 @@ func TestXORBytesCorrectness(t *testing.T) {
 	current.Marshal(a)
 	previous.Marshal(b)
 
-	XORBytes(dst, a, b)
+	xorBytes(dst, a, b)
 
 	for i := 0; i < 35; i++ {
 		if want := a[i] ^ b[i]; dst[i] != want {
@@ -528,7 +528,7 @@ func TestXORBytesCorrectness(t *testing.T) {
 	}
 
 	// Self-inverse: XOR(delta, b) must recover a exactly.
-	XORBytes(recovered, dst, b)
+	xorBytes(recovered, dst, b)
 	for i := 0; i < 35; i++ {
 		if recovered[i] != a[i] {
 			t.Errorf("reversibility byte %d: got %02x, want %02x", i, recovered[i], a[i])
@@ -544,7 +544,7 @@ type multiCaptureSink struct {
 }
 
 // Flush copies payload and sends it on the channel non-blocking.
-func (m *multiCaptureSink) Flush(payload []byte) error {
+func (m *multiCaptureSink) Flush(_ context.Context, payload []byte) error {
 	buf := make([]byte, len(payload))
 	copy(buf, payload)
 	select {
@@ -554,7 +554,7 @@ func (m *multiCaptureSink) Flush(payload []byte) error {
 	return nil
 }
 
-func (m *multiCaptureSink) reliable() {}
+func (m *multiCaptureSink) Reliable() {}
 
 // TestDeltaEncodingReconstruction verifies the end-to-end delta encoding
 // contract across three successive flushes, including a variable-length case
@@ -570,7 +570,7 @@ func TestDeltaEncodingReconstruction(t *testing.T) {
 	const maxItems = 4
 
 	sink := &multiCaptureSink{ch: make(chan []byte, 4)}
-	b := New[OrderBookState](Config{
+	b := MustNew[OrderBookState](Config{
 		QueueSize:     16,
 		MaxBatchSize:  headerSize + maxItems*itemSize,
 		MaxItemSize:   itemSize,
@@ -636,7 +636,7 @@ func TestDeltaEncodingReconstruction(t *testing.T) {
 	// Frame 1: previousState was all zeros, so delta1 XOR zeros = raw items.
 	// Verify by reconstructing item bytes only (header carries live seq/count).
 	recon1 := make([]byte, len(delta1))
-	XORBytes(recon1, delta1, make([]byte, len(delta1))) // XOR with zero = identity
+	xorBytes(recon1, delta1, make([]byte, len(delta1))) // XOR with zero = identity
 	if !bytes.Equal(recon1[headerSize:], delta1[headerSize:]) {
 		t.Error("frame 1: reconstruction from zero state produced unexpected result")
 	}
@@ -646,7 +646,7 @@ func TestDeltaEncodingReconstruction(t *testing.T) {
 		t.Fatalf("frame 2 delta length: got %d, want %d", len(delta2), headerSize+itemSize)
 	}
 	recon2items := make([]byte, itemSize)
-	XORBytes(recon2items, delta2[headerSize:], delta1[headerSize:])
+	xorBytes(recon2items, delta2[headerSize:], delta1[headerSize:])
 	if !bytes.Equal(recon2items, raw2[headerSize:]) {
 		t.Errorf("frame 2 reconstruction mismatch:\n got  %v\n want %v", recon2items, raw2[headerSize:])
 	}
@@ -661,7 +661,7 @@ func TestDeltaEncodingReconstruction(t *testing.T) {
 	prev3 := make([]byte, 2*itemSize) // zeros beyond itemSize represent cleared stale bytes
 	copy(prev3, raw2[headerSize:])
 	recon3items := make([]byte, 2*itemSize)
-	XORBytes(recon3items, delta3[headerSize:], prev3)
+	xorBytes(recon3items, delta3[headerSize:], prev3)
 	if !bytes.Equal(recon3items, raw3[headerSize:]) {
 		t.Errorf("frame 3 reconstruction mismatch:\n got  %v\n want %v", recon3items, raw3[headerSize:])
 	}
@@ -677,7 +677,7 @@ type blockingMockSink struct {
 }
 
 // Flush sleeps for 50 ms, recording the stall window via the flushing flag.
-func (s *blockingMockSink) Flush(_ []byte) error {
+func (s *blockingMockSink) Flush(_ context.Context, _ []byte) error {
 	s.flushing.Store(true)
 	time.Sleep(50 * time.Millisecond)
 	s.flushing.Store(false)
@@ -687,14 +687,14 @@ func (s *blockingMockSink) Flush(_ []byte) error {
 
 // TestNonBlockingPushDuringStalledFlush proves that Push never blocks on a
 // stalled downstream Sink. While the drain goroutine is sleeping inside
-// Flush for 50 ms, a producer goroutine must complete Push within 20 ms —
-// well below the stall duration — because Push writes only to the lock-free
+// Flush for 50 ms, a producer goroutine must complete Push within 20 ms -
+// well below the stall duration - because Push writes only to the lock-free
 // ring buffer, which is completely decoupled from the Sink call path.
 // A goroutine-and-channel pattern is used instead of a wall-clock threshold
 // so the assertion survives CI scheduler jitter.
 func TestNonBlockingPushDuringStalledFlush(t *testing.T) {
 	sink := &blockingMockSink{}
-	b := New[MarketTick](Config{
+	b := MustNew[MarketTick](Config{
 		QueueSize:    1 << 10,
 		MaxBatchSize: 4096,
 		MaxItemSize:  12,
@@ -730,7 +730,7 @@ func TestNonBlockingPushDuringStalledFlush(t *testing.T) {
 	}()
 	select {
 	case <-pushDone:
-		// passed — Push returned before the 20 ms timeout
+		// passed - Push returned before the 20 ms timeout
 	case <-time.After(20 * time.Millisecond):
 		t.Error("Push did not return within 20ms while sink was stalled; " +
 			"producer must never be coupled to downstream I/O")
@@ -742,11 +742,11 @@ func TestNonBlockingPushDuringStalledFlush(t *testing.T) {
 // the goroutine exits, with no goroutine leak.
 func TestGracefulShutdown(t *testing.T) {
 	sink := &countingSink{}
-	b := New[MarketTick](Config{
+	b := MustNew[MarketTick](Config{
 		QueueSize:    1 << 10,
 		MaxBatchSize: 4096,
 		MaxItemSize:  12,
-		TickRate:     1, // 1 Hz — first tick is 1 s away, ensuring cancel fires first
+		TickRate:     1, // 1 Hz - first tick is 1 s away, ensuring cancel fires first
 		Sink:         sink,
 	})
 
@@ -782,7 +782,7 @@ func BenchmarkXORBytesVectorized(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		XORBytes(dst, a, src)
+		xorBytes(dst, a, src)
 	}
 }
 
@@ -805,7 +805,7 @@ func BenchmarkXORBytesNaive(b *testing.B) {
 // BenchmarkPush is the Phase 1 performance gate.
 // Success criterion: 0 B/op and 0 allocs/op.
 func BenchmarkPush(b *testing.B) {
-	batcher := New[MarketTick](Config{QueueSize: 1 << 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 60})
+	batcher := MustNew[MarketTick](Config{QueueSize: 1 << 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 60})
 	item := MarketTick{Price: 415.25, Volume: 200, Spread: 0.01}
 
 	b.ResetTimer()
@@ -824,7 +824,7 @@ func BenchmarkPush(b *testing.B) {
 type hangSink struct{ release chan struct{} }
 
 // Flush blocks until release is closed, simulating a permanently stalled transport.
-func (s *hangSink) Flush([]byte) error { <-s.release; return nil }
+func (s *hangSink) Flush(context.Context, []byte) error { <-s.release; return nil }
 
 // TestDrainStopsBeforeOverflow verifies the C-1 fix: when byteBuffer cannot hold
 // another item the drain loop must break before dequeuing, leaving the item queued
@@ -833,7 +833,7 @@ func TestDrainStopsBeforeOverflow(t *testing.T) {
 	const tickSize = 20
 
 	sink := &multiCaptureSink{ch: make(chan []byte, 4)}
-	b := New[Tick](Config{
+	b := MustNew[Tick](Config{
 		QueueSize:    16,
 		MaxBatchSize: headerSize + tickSize,
 		MaxItemSize:  tickSize,
@@ -885,11 +885,11 @@ func TestShutdownFlushTimeout(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	sink := &hangSink{release: release}
-	b := New[MarketTick](Config{
+	b := MustNew[MarketTick](Config{
 		QueueSize:       16,
 		MaxBatchSize:    headerSize + 12,
 		MaxItemSize:     12,
-		TickRate:        1, // 1 Hz — tick is 1 s away; cancel fires first
+		TickRate:        1, // 1 Hz - tick is 1 s away; cancel fires first
 		Sink:            sink,
 		ShutdownTimeout: 20 * time.Millisecond,
 		OnFlushError: func(err error) {
@@ -930,7 +930,7 @@ func TestNewPanicsOnDeltaEncodingWithUnreliableSink(t *testing.T) {
 			t.Error("New with DeltaEncoding=true and a non-ReliableSink did not panic")
 		}
 	}()
-	New[MarketTick](Config{
+	MustNew[MarketTick](Config{
 		QueueSize:     16,
 		MaxBatchSize:  headerSize + 12,
 		MaxItemSize:   12,
@@ -947,7 +947,7 @@ func TestEvictedCount(t *testing.T) {
 		size   = 4
 		extras = 3
 	)
-	b := New[OrderUpdate](Config{
+	b := MustNew[OrderUpdate](Config{
 		QueueSize:    size,
 		MaxBatchSize: headerSize + 24,
 		MaxItemSize:  24,
@@ -971,7 +971,7 @@ func TestEvictedCount(t *testing.T) {
 }
 
 // TestPaddedSeqSize asserts that paddedSeq occupies exactly one 64-byte cache line.
-// If this fails, the parallel-array false-sharing fix is broken — two adjacent sequence
+// If this fails, the parallel-array false-sharing fix is broken - two adjacent sequence
 // numbers would share a cache line and reintroduce MESI coherence storms under MPMC fan-in.
 func TestPaddedSeqSize(t *testing.T) {
 	if got := unsafe.Sizeof(paddedSeq{}); got != 64 {
@@ -999,7 +999,7 @@ func TestPushInlines(t *testing.T) {
 func TestFlushErrorCount(t *testing.T) {
 	t.Parallel()
 	errSink := &failSink{}
-	b := New[MarketTick](Config{
+	b := MustNew[MarketTick](Config{
 		QueueSize:    16,
 		MaxBatchSize: headerSize + int(unsafe.Sizeof(MarketTick{})),
 		MaxItemSize:  int(unsafe.Sizeof(MarketTick{})),
@@ -1025,7 +1025,7 @@ func TestFlushErrorCount(t *testing.T) {
 // and advances to a recent timestamp after a successful flush.
 func TestLastFlushAt(t *testing.T) {
 	t.Parallel()
-	b := New[MarketTick](Config{
+	b := MustNew[MarketTick](Config{
 		QueueSize:    16,
 		MaxBatchSize: headerSize + int(unsafe.Sizeof(MarketTick{})),
 		MaxItemSize:  int(unsafe.Sizeof(MarketTick{})),
@@ -1057,11 +1057,11 @@ func TestQueueDepth(t *testing.T) {
 	t.Parallel()
 	const qsize = 32
 	itemSize := int(unsafe.Sizeof(MarketTick{}))
-	b := New[MarketTick](Config{
+	b := MustNew[MarketTick](Config{
 		QueueSize:    qsize,
 		MaxBatchSize: headerSize + itemSize*qsize,
 		MaxItemSize:  itemSize,
-		TickRate:     1, // very slow — items accumulate between ticks
+		TickRate:     1, // very slow - items accumulate between ticks
 		Sink:         &countingSink{},
 	})
 	if b.QueueCap() != qsize {
@@ -1084,7 +1084,7 @@ func TestFlushTimeout(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release) // unblock the timeout-abandoned flush goroutine on test exit
 	itemSize := int(unsafe.Sizeof(MarketTick{}))
-	b := New[MarketTick](Config{
+	b := MustNew[MarketTick](Config{
 		QueueSize:    64,
 		MaxBatchSize: headerSize + itemSize*64,
 		MaxItemSize:  itemSize,
@@ -1110,7 +1110,7 @@ func TestFlushTimeout(t *testing.T) {
 func TestBytesFlushed(t *testing.T) {
 	t.Parallel()
 	itemSize := int(unsafe.Sizeof(MarketTick{}))
-	b := New[MarketTick](Config{
+	b := MustNew[MarketTick](Config{
 		QueueSize:    16,
 		MaxBatchSize: headerSize + itemSize,
 		MaxItemSize:  itemSize,
@@ -1138,7 +1138,7 @@ func TestCoalescedTicks(t *testing.T) {
 	t.Parallel()
 	itemSize := int(unsafe.Sizeof(MarketTick{}))
 	// TickRate 100 → 10ms interval. slowSink sleeps 50ms per flush → ~4 coalesced per flush.
-	b := New[MarketTick](Config{
+	b := MustNew[MarketTick](Config{
 		QueueSize:    64,
 		MaxBatchSize: headerSize + itemSize*64,
 		MaxItemSize:  itemSize,
@@ -1160,7 +1160,7 @@ func TestCoalescedTicks(t *testing.T) {
 // failSink is a Sink whose Flush always returns an error.
 type failSink struct{}
 
-func (f *failSink) Flush(_ []byte) error {
+func (f *failSink) Flush(_ context.Context, _ []byte) error {
 	return errors.New("failSink: always fails")
 }
 
@@ -1169,7 +1169,7 @@ type slowSink struct {
 	delay time.Duration
 }
 
-func (s *slowSink) Flush(_ []byte) error {
+func (s *slowSink) Flush(_ context.Context, _ []byte) error {
 	time.Sleep(s.delay)
 	return nil
 }
@@ -1185,7 +1185,7 @@ func TestXORBytesShortDstPanics(t *testing.T) {
 				t.Error("XORBytes with short dst did not panic")
 			}
 		}()
-		XORBytes(make([]byte, 4), a, b)
+		xorBytes(make([]byte, 4), a, b)
 	})
 
 	t.Run("short b", func(t *testing.T) {
@@ -1194,6 +1194,106 @@ func TestXORBytesShortDstPanics(t *testing.T) {
 				t.Error("XORBytes with short b did not panic")
 			}
 		}()
-		XORBytes(make([]byte, 8), a, make([]byte, 4))
+		xorBytes(make([]byte, 8), a, make([]byte, 4))
 	})
+}
+
+// TestNewReturnsErrorOnInvalidConfig verifies that New returns an error wrapping
+// ErrInvalidConfig (rather than panicking) for each class of invalid Config, so
+// callers can validate configuration without recover. MustNew's panic-on-error
+// behavior is covered by the TestNewPanicsOn* tests.
+func TestNewReturnsErrorOnInvalidConfig(t *testing.T) {
+	t.Parallel()
+	cases := map[string]Config{
+		"zero queue size":       {QueueSize: 0, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 60},
+		"non power of two":      {QueueSize: 3, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 60},
+		"batch below header":    {QueueSize: 16, MaxBatchSize: headerSize - 1, MaxItemSize: 12, TickRate: 60},
+		"non-positive tick":     {QueueSize: 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 0},
+		"excessive tick":        {QueueSize: 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 1_000_000_001},
+		"invalid backpressure":  {QueueSize: 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 60, Backpressure: BackpressurePolicy(99)},
+		"delta unreliable sink": {QueueSize: 16, MaxBatchSize: headerSize + 12, MaxItemSize: 12, TickRate: 60, Sink: &countingSink{}, DeltaEncoding: true},
+	}
+	for name, cfg := range cases {
+		t.Run(name, func(t *testing.T) {
+			b, err := New[MarketTick](cfg)
+			if err == nil {
+				t.Fatalf("New(%s) returned nil error, want ErrInvalidConfig", name)
+			}
+			if !errors.Is(err, ErrInvalidConfig) {
+				t.Errorf("New(%s) error %v does not wrap ErrInvalidConfig", name, err)
+			}
+			if b != nil {
+				t.Errorf("New(%s) returned non-nil Batcher alongside error", name)
+			}
+		})
+	}
+}
+
+// TestClockInjection verifies that the unexported newTicker hook lets a test drive
+// the drain loop deterministically: exactly one manual tick produces exactly one
+// flush, with no dependence on wall-clock timing.
+func TestClockInjection(t *testing.T) {
+	t.Parallel()
+	const tickSize = 20
+	tickCh := make(chan time.Time)
+	sink := &multiCaptureSink{ch: make(chan []byte, 4)}
+	b := MustNew[Tick](Config{
+		QueueSize:    16,
+		MaxBatchSize: headerSize + tickSize,
+		MaxItemSize:  tickSize,
+		TickRate:     60, // ignored: the injected ticker controls cadence
+		Sink:         sink,
+		newTicker: func(time.Duration) (<-chan time.Time, func()) {
+			return tickCh, func() {}
+		},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := b.Start(ctx)
+	defer func() { cancel(); <-done }()
+
+	b.Push(Tick{Symbol: [8]byte{'Z'}, Price: 1.0, Size: 1})
+	tickCh <- time.Now() // drive exactly one drain cycle
+
+	select {
+	case payload := <-sink.ch:
+		if count := uint16(payload[4]) | uint16(payload[5])<<8; count != 1 {
+			t.Errorf("item count: got %d, want 1", count)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("injected tick did not produce a flush")
+	}
+}
+
+// TestStats verifies that Stats returns a snapshot consistent with the individual
+// counter accessors after a successful flush.
+func TestStats(t *testing.T) {
+	t.Parallel()
+	itemSize := int(unsafe.Sizeof(MarketTick{}))
+	b := MustNew[MarketTick](Config{
+		QueueSize:    16,
+		MaxBatchSize: headerSize + itemSize,
+		MaxItemSize:  itemSize,
+		TickRate:     200,
+		Sink:         &countingSink{},
+	})
+	if s := b.Stats(); s.QueueCap != 16 {
+		t.Fatalf("Stats().QueueCap = %d, want 16", s.QueueCap)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := b.Start(ctx)
+	b.Push(MarketTick{Price: 1.0})
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	<-done
+	s := b.Stats()
+	if s.FlushedBatches != b.FlushedBatches() {
+		t.Errorf("Stats().FlushedBatches = %d, accessor = %d", s.FlushedBatches, b.FlushedBatches())
+	}
+	if s.FlushedBatches == 0 {
+		t.Error("expected Stats().FlushedBatches > 0 after a flush")
+	}
+	if s.BytesFlushed == 0 {
+		t.Error("expected Stats().BytesFlushed > 0 after a flush")
+	}
 }

@@ -88,7 +88,7 @@ func TestTCPSinkRoundTrip(t *testing.T) {
 	})
 
 	itemSize := int(unsafe.Sizeof(tcpTestItem{}))
-	b := tickbatch.New[tcpTestItem](tickbatch.Config{
+	b := tickbatch.MustNew[tcpTestItem](tickbatch.Config{
 		Sink:         sink,
 		QueueSize:    64,
 		MaxBatchSize: 4096,
@@ -163,7 +163,7 @@ func TestTCPSinkImplementsReliableSink(t *testing.T) {
 		}
 	}()
 
-	_ = tickbatch.New[tcpTestItem](tickbatch.Config{
+	_ = tickbatch.MustNew[tcpTestItem](tickbatch.Config{
 		Sink:          sink,
 		QueueSize:     16,
 		MaxBatchSize:  1024,
@@ -220,7 +220,7 @@ func TestTCPSinkErrorCountOnBrokenConn(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	itemSize := int(unsafe.Sizeof(tcpTestItem{}))
-	b := tickbatch.New[tcpTestItem](tickbatch.Config{
+	b := tickbatch.MustNew[tcpTestItem](tickbatch.Config{
 		Sink:         sink,
 		QueueSize:    64,
 		MaxBatchSize: 4096,
@@ -304,7 +304,7 @@ func TestTCPSinkUnixDomainSocket(t *testing.T) {
 	})
 
 	itemSize := int(unsafe.Sizeof(tcpTestItem{}))
-	b := tickbatch.New[tcpTestItem](tickbatch.Config{
+	b := tickbatch.MustNew[tcpTestItem](tickbatch.Config{
 		Sink:         sink,
 		QueueSize:    16,
 		MaxBatchSize: 1024,

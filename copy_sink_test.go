@@ -2,6 +2,7 @@ package tickbatch_test
 
 import (
 	"bytes"
+	"context"
 	"testing"
 	"unsafe"
 
@@ -12,7 +13,7 @@ import (
 // This simulates an async broker that enqueues the pointer and returns immediately.
 type refSink struct{ got []byte }
 
-func (r *refSink) Flush(payload []byte) error {
+func (r *refSink) Flush(_ context.Context, payload []byte) error {
 	r.got = payload
 	return nil
 }
@@ -40,7 +41,7 @@ func TestCopyingSinkIsolatesBuffer(t *testing.T) {
 	cs := tickbatch.CopyingSink{Inner: inner}
 
 	original := []byte{1, 2, 3, 4, 5, 6, 7, 8}
-	if err := cs.Flush(original); err != nil {
+	if err := cs.Flush(context.Background(), original); err != nil {
 		t.Fatal(err)
 	}
 
@@ -69,7 +70,7 @@ func TestReliableCopyingSinkEnablesDeltaEncoding(t *testing.T) {
 		}
 	}()
 
-	_ = tickbatch.New[copyTestItem](tickbatch.Config{
+	_ = tickbatch.MustNew[copyTestItem](tickbatch.Config{
 		Sink:          cs,
 		QueueSize:     16,
 		MaxBatchSize:  1024,
