@@ -17,7 +17,7 @@ Email **hertyk.estate@gmail.com** with the subject line `[tickbatch] Security Re
 - Steps to reproduce or a minimal proof-of-concept.
 - The tickbatch version and Go version affected.
 
-You will receive an acknowledgement within 72 hours. Please allow up to 14 days for a fix before
+You will receive an acknowledgment within 72 hours. Please allow up to 14 days for a fix before
 any public disclosure.
 
 ## Scope

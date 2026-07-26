@@ -67,4 +67,6 @@
 //	b.Push(Event{ID: 1, Value: 3.14}) // non-blocking, zero allocations
 //	cancel()
 //	<-done
+//
+// See the package examples for complete, runnable demonstrations.
 package tickbatch

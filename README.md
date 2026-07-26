@@ -27,7 +27,7 @@ The naive fixes trade one failure mode for another:
 
 You patch one leak and spring another. The producer stalls. The p99 latency climbs.
 
-| | `tickbatch` | Buffered `chan` | `sync.Pool` + mutex |
+| Metric | `tickbatch` | Buffered `chan` | `sync.Pool` + mutex |
 |---|---|---|---|
 | Allocs per push | **0** | 0 | 0 (hit) / 1 (miss) |
 | Blocks producer under burst | **Never** | Yes (full channel) | Yes (lock contention) |
