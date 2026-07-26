@@ -234,7 +234,7 @@ The ring buffer uses Dmitry Vyukov's sequence-based MPMC algorithm. Each slot ca
 
 The head and tail cursors are each placed on their own 64-byte cache line inside the `ringbuf` struct:
 
-```
+```go
 head atomic.Uint64
 _    [56]byte        // pads head (8 B) to a full 64-byte cache line, isolating it from tail
 tail atomic.Uint64
