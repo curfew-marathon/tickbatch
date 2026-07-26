@@ -9,7 +9,7 @@ Feed it a firehose of risk events, audit records, or market data telemetry. It a
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![GoDoc](https://pkg.go.dev/badge/github.com/curfew-marathon/tickbatch.svg)](https://pkg.go.dev/github.com/curfew-marathon/tickbatch)
 
-**`0 B/op` · `0 allocs/op` · ~80M pushes/sec · zero deps · zero CGO · 2 fuzz harnesses**
+**`0 B/op` · `0 allocs/op` · ~80M pushes/sec · zero deps · zero CGO · 3 fuzz harnesses**
 
 ---
 
@@ -295,16 +295,18 @@ sink := tickbatch.CopyingSink{Inner: KafkaSink{producer: w}}
 
 ### Correctness & Safety
 
-tickbatch bypasses `encoding/binary` and uses `unsafe.Pointer` arithmetic throughout the hot path. To validate these low-level invariants, the library ships two fuzzing harnesses:
+tickbatch bypasses `encoding/binary` and uses `unsafe.Pointer` arithmetic throughout the hot path. To validate these low-level invariants, the library ships three fuzzing harnesses:
 
 - **`FuzzXORBytes`** stress-tests the vectorized XOR engine - both the 8-byte word loop and the `len%8` tail-byte fallback - asserting that XOR-ing a payload twice recovers the original byte-for-byte. Exercises the alignment edge cases that are hardest to catch with hand-written unit tests.
 - **`FuzzTickSerialization`** stress-tests the `Marshal`/unmarshal round-trip with randomly generated field values including bit patterns that produce NaN floats, infinities, and denormals.
+- **`FuzzMarshalBounds`** drives the full `Push` to drain path with a `Marshal` whose reported length and buffer geometry are fuzz-controlled, proving the drain loop never overruns its buffer (even when `Marshal` reports zero or more bytes than the buffer holds) and that every emitted frame decodes and passes its CRC check.
 
 To extend the corpus locally:
 
 ```bash
 go test -fuzz=FuzzXORBytes -fuzztime=60s ./...
 go test -fuzz=FuzzTickSerialization -fuzztime=60s ./...
+go test -fuzz=FuzzMarshalBounds -fuzztime=60s ./...
 ```
 
 ### Observability
