@@ -983,9 +983,14 @@ func TestPaddedSeqSize(t *testing.T) {
 // introduces a function-call overhead on the hot path and the zero-allocation
 // contract is at risk.
 func TestPushInlines(t *testing.T) {
-	out, _ := exec.Command("go", "build", "-gcflags=-m", "./...").CombinedOutput()
-	if bytes.Contains(out, []byte("cannot inline (*ringbuf")) {
-		t.Fatalf("ring push fell off the inlining cliff:\n%s", out)
+	out, err := exec.Command("go", "build", "-gcflags=-m", "./...").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go build failed: %v\n%s", err, out)
+	}
+	for _, line := range bytes.Split(out, []byte("\n")) {
+		if bytes.Contains(line, []byte("cannot inline")) && bytes.Contains(line, []byte(").push")) {
+			t.Fatalf("ring push fell off the inlining cliff.\nTriggering line: %s\n\nFull output:\n%s", line, out)
+		}
 	}
 }
 
