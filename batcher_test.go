@@ -3,6 +3,7 @@ package tickbatch
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os/exec"
 	"sync/atomic"
 	"testing"
@@ -992,6 +993,185 @@ func TestPushInlines(t *testing.T) {
 			t.Fatalf("ring push fell off the inlining cliff.\nTriggering line: %s\n\nFull output:\n%s", line, out)
 		}
 	}
+}
+
+// TestFlushErrorCount verifies that FlushErrorCount increments on each failed Sink.Flush.
+func TestFlushErrorCount(t *testing.T) {
+	t.Parallel()
+	errSink := &failSink{}
+	b := New[MarketTick](Config{
+		QueueSize:    16,
+		MaxBatchSize: headerSize + int(unsafe.Sizeof(MarketTick{})),
+		MaxItemSize:  int(unsafe.Sizeof(MarketTick{})),
+		TickRate:     200,
+		Sink:         errSink,
+		OnFlushError: func(error) {},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := b.Start(ctx)
+	b.Push(MarketTick{Price: 1.0})
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	<-done
+	if b.FlushErrorCount() == 0 {
+		t.Fatal("expected FlushErrorCount > 0 after failing sink")
+	}
+	if b.FlushedBatches() != 0 {
+		t.Fatal("expected FlushedBatches == 0 when all flushes fail")
+	}
+}
+
+// TestLastFlushAt verifies that LastFlushAt is zero before the first flush
+// and advances to a recent timestamp after a successful flush.
+func TestLastFlushAt(t *testing.T) {
+	t.Parallel()
+	b := New[MarketTick](Config{
+		QueueSize:    16,
+		MaxBatchSize: headerSize + int(unsafe.Sizeof(MarketTick{})),
+		MaxItemSize:  int(unsafe.Sizeof(MarketTick{})),
+		TickRate:     200,
+		Sink:         &countingSink{},
+	})
+	if !b.LastFlushAt().IsZero() {
+		t.Fatal("expected LastFlushAt to be zero before first flush")
+	}
+	before := time.Now()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := b.Start(ctx)
+	b.Push(MarketTick{Price: 1.0})
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	<-done
+	ts := b.LastFlushAt()
+	if ts.IsZero() {
+		t.Fatal("expected LastFlushAt to be non-zero after flush")
+	}
+	if ts.Before(before) {
+		t.Errorf("LastFlushAt %v predates test start %v", ts, before)
+	}
+}
+
+// TestQueueDepth verifies that QueueDepth reports a positive count while items
+// are queued and that QueueCap matches the configured size.
+func TestQueueDepth(t *testing.T) {
+	t.Parallel()
+	const qsize = 32
+	itemSize := int(unsafe.Sizeof(MarketTick{}))
+	b := New[MarketTick](Config{
+		QueueSize:    qsize,
+		MaxBatchSize: headerSize + itemSize*qsize,
+		MaxItemSize:  itemSize,
+		TickRate:     1, // very slow — items accumulate between ticks
+		Sink:         &countingSink{},
+	})
+	if b.QueueCap() != qsize {
+		t.Fatalf("QueueCap() = %d, want %d", b.QueueCap(), qsize)
+	}
+	// Push half the ring's capacity without starting the drain loop.
+	for i := range qsize / 2 {
+		b.Push(MarketTick{Price: float32(i)})
+	}
+	if depth := b.QueueDepth(); depth == 0 {
+		t.Fatal("expected QueueDepth > 0 after pushing items without starting drain")
+	}
+}
+
+// TestFlushTimeout verifies that a hung sink does not block the drain goroutine
+// indefinitely: FlushErrorCount increments, subsequent items are still processed,
+// and the engine shuts down cleanly.
+func TestFlushTimeout(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	defer close(release) // unblock the timeout-abandoned flush goroutine on test exit
+	itemSize := int(unsafe.Sizeof(MarketTick{}))
+	b := New[MarketTick](Config{
+		QueueSize:    64,
+		MaxBatchSize: headerSize + itemSize*64,
+		MaxItemSize:  itemSize,
+		TickRate:     100,
+		Sink:         &hangSink{release: release},
+		FlushTimeout: 20 * time.Millisecond,
+		OnFlushError: func(error) {},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	done := b.Start(ctx)
+	for range 10 {
+		b.Push(MarketTick{Price: 1.0})
+	}
+	<-done
+	if b.FlushErrorCount() == 0 {
+		t.Fatal("expected FlushErrorCount > 0 with hang sink and FlushTimeout set")
+	}
+}
+
+// TestBytesFlushed verifies that BytesFlushed accumulates payload bytes after
+// a successful flush.
+func TestBytesFlushed(t *testing.T) {
+	t.Parallel()
+	itemSize := int(unsafe.Sizeof(MarketTick{}))
+	b := New[MarketTick](Config{
+		QueueSize:    16,
+		MaxBatchSize: headerSize + itemSize,
+		MaxItemSize:  itemSize,
+		TickRate:     200,
+		Sink:         &countingSink{},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := b.Start(ctx)
+	b.Push(MarketTick{Price: 1.0})
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	<-done
+	if b.BytesFlushed() == 0 {
+		t.Fatal("expected BytesFlushed > 0 after successful flush")
+	}
+	expectedMin := uint64(headerSize + itemSize)
+	if b.BytesFlushed() < expectedMin {
+		t.Errorf("BytesFlushed() = %d, want >= %d", b.BytesFlushed(), expectedMin)
+	}
+}
+
+// TestCoalescedTicks verifies that CoalescedTicks accumulates when a flush takes
+// longer than the tick interval.
+func TestCoalescedTicks(t *testing.T) {
+	t.Parallel()
+	itemSize := int(unsafe.Sizeof(MarketTick{}))
+	// TickRate 100 → 10ms interval. slowSink sleeps 50ms per flush → ~4 coalesced per flush.
+	b := New[MarketTick](Config{
+		QueueSize:    64,
+		MaxBatchSize: headerSize + itemSize*64,
+		MaxItemSize:  itemSize,
+		TickRate:     100,
+		Sink:         &slowSink{delay: 50 * time.Millisecond},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	done := b.Start(ctx)
+	for range 10 {
+		b.Push(MarketTick{Price: 1.0})
+	}
+	<-done
+	if b.CoalescedTicks() == 0 {
+		t.Fatal("expected CoalescedTicks > 0 when flush exceeds tick interval")
+	}
+}
+
+// failSink is a Sink whose Flush always returns an error.
+type failSink struct{}
+
+func (f *failSink) Flush(_ []byte) error {
+	return errors.New("failSink: always fails")
+}
+
+// slowSink is a Sink that sleeps for a fixed duration before returning.
+type slowSink struct {
+	delay time.Duration
+}
+
+func (s *slowSink) Flush(_ []byte) error {
+	time.Sleep(s.delay)
+	return nil
 }
 
 // TestXORBytesShortDstPanics verifies that XORBytes panics when dst is shorter than a.
