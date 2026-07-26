@@ -49,9 +49,10 @@ never return more than `len(buf)`.
 To be delivered in a batch, an item must write at least 1 byte. A return of `0` is
 a valid signal meaning "nothing to encode": the engine drops that item and increments
 `TruncatedCount()` (so `0` is permitted, not an error, but it is never carried on the
-wire). A return greater than `len(buf)` is a contract violation; the engine defensively
-drops the item and increments `TruncatedCount()` rather than overrunning its buffer.
-Neither case ever panics.
+wire). A return greater than `len(buf)`, or a negative return, is a contract violation;
+the engine defensively drops the item and increments `TruncatedCount()` rather than
+overrunning its buffer or advancing the write offset below the header. None of these
+cases ever panics.
 
 ## Codec configuration is out-of-band
 

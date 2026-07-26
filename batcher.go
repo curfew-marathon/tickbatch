@@ -547,11 +547,14 @@ func (b *Batcher[T]) drainAndFlush(base context.Context, prevOffset *int, keyfra
 		if !ok {
 			break
 		}
-		if written == 0 || written > avail {
-			// written == 0: Marshal wrote nothing (bug or MaxItemSize too small).
+		if written <= 0 || written > avail {
+			// written <= 0: Marshal wrote nothing (written == 0: a bug or a
+			// MaxItemSize that is too small) or reported a negative length (a
+			// misbehaving Marshal); advancing offset by a non-positive count would
+			// push it below headerSize and panic in the header/CRC slicing below.
 			// written > avail: a misbehaving Marshal reported more than the buffer
 			// holds; advancing offset would overrun byteBuffer and panic in the
-			// header/CRC slicing below, violating the never-panic invariant. Both
+			// header/CRC slicing below, violating the never-panic invariant. All
 			// cases discard the item and count it as truncated.
 			b.truncated.Add(1)
 			break

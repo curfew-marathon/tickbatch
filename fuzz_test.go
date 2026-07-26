@@ -1,8 +1,11 @@
 package tickbatch
 
 import (
+	"context"
 	"testing"
 	"unsafe"
+
+	"github.com/curfew-marathon/tickbatch/codec"
 )
 
 // testXORPanic asserts that xorBytes panics with the deliberate bounds-check
@@ -112,6 +115,139 @@ func FuzzTickSerialization(f *testing.F) {
 		for i := 0; i < size; i++ {
 			if buf[i] != expected[i] {
 				t.Fatalf("Marshal byte %d: got %02x, want %02x", i, buf[i], expected[i])
+			}
+		}
+	})
+}
+
+// fuzzMarshalItem is a Serializable whose Marshal behavior is fully driven by its
+// own fields, letting a fuzzer exercise every branch of the drain-loop bounds
+// checks in drainAndFlush without unsafe pointer tricks. The declared field is the
+// length Marshal reports to the engine, which may legally be zero or - as a
+// contract violation the engine must tolerate rather than trust - larger than
+// len(buf). The written field is how many bytes Marshal actually fills, always
+// clamped to len(buf) so Marshal itself never overruns the caller's buffer.
+type fuzzMarshalItem struct {
+	declared int32
+	written  int32
+	fill     byte
+	_        [3]byte // Explicit padding keeps the struct flat and its size stable.
+}
+
+// Marshal fills min(max(written, 0), len(buf)) bytes with fill and returns
+// declared, deliberately allowing a returned length that is zero, negative, or
+// larger than len(buf) to stress the engine's defensive truncation path. It never
+// itself writes outside buf; only the reported length is hostile.
+func (f fuzzMarshalItem) Marshal(buf []byte) int {
+	w := int(f.written)
+	if w < 0 {
+		w = 0
+	}
+	if w > len(buf) {
+		w = len(buf)
+	}
+	for i := 0; i < w; i++ {
+		buf[i] = f.fill
+	}
+	return int(f.declared)
+}
+
+// fuzzCaptureSink records a copy of every flushed frame. The fuzz test drives
+// drainAndFlush synchronously on one goroutine, so no locking is required.
+type fuzzCaptureSink struct {
+	frames [][]byte
+}
+
+// Flush stores a copy of payload and never fails.
+func (s *fuzzCaptureSink) Flush(_ context.Context, payload []byte) error {
+	cp := make([]byte, len(payload))
+	copy(cp, payload)
+	s.frames = append(s.frames, cp)
+	return nil
+}
+
+// FuzzMarshalBounds drives the real Push to drain to popMarshal to drainAndFlush
+// path with a Marshal whose reported length and fill length are fuzz-controlled,
+// across fuzzed buffer geometries (MaxItemSize and MaxBatchSize). Unlike
+// FuzzTickSerialization, which exercises Marshal in isolation, this proves two
+// engine-level invariants that no other test covers end to end:
+//
+//  1. The drain loop never panics or overruns byteBuffer, even when Marshal
+//     reports zero, negative, or more bytes than the remaining buffer holds (the
+//     contract-violation branch documented in SPEC.md), and even when the ring is
+//     driven past capacity under either backpressure policy.
+//  2. Every frame the engine actually emits is well-formed: the reference decoder
+//     parses it and its CRC validates over the body.
+func FuzzMarshalBounds(f *testing.F) {
+	f.Add([]byte{4, 0, 4, 0xAB}, uint8(4), uint8(1))       // Exact-fill valid item.
+	f.Add([]byte{0, 0, 0, 0x00}, uint8(8), uint8(2))       // Marshal returns 0: truncated.
+	f.Add([]byte{0x00, 0x40, 0, 0x11}, uint8(3), uint8(1)) // Over-long return: truncated.
+	f.Add([]byte{0x00, 0x80, 4, 0xAB}, uint8(4), uint8(1)) // Negative reported length: truncated.
+	f.Add(make([]byte, 80), uint8(8), uint8(0x81))         // Ring overflow under DropOldest.
+	f.Add([]byte{}, uint8(1), uint8(1))                    // No items: no frames emitted.
+
+	f.Fuzz(func(t *testing.T, data []byte, rawItemSize, rawBatchItems uint8) {
+		itemSize := int(rawItemSize%64) + 1    // Range [1, 64].
+		batchItems := int(rawBatchItems%8) + 1 // Range [1, 8] item slots per batch.
+		maxBatch := headerSize + itemSize*batchItems
+
+		// Choose the backpressure policy from a spare fuzz bit so both the
+		// DropNewest and DropOldest overflow paths are exercised.
+		backpressure := DropNewest
+		if rawBatchItems&0x80 != 0 {
+			backpressure = DropOldest
+		}
+
+		sink := &fuzzCaptureSink{}
+		b, err := New[fuzzMarshalItem](Config{
+			QueueSize:    16,
+			MaxBatchSize: maxBatch,
+			MaxItemSize:  itemSize,
+			TickRate:     60,
+			Sink:         sink,
+			Backpressure: backpressure,
+		})
+		if err != nil {
+			t.Fatalf("New rejected a valid config (itemSize=%d batchItems=%d): %v", itemSize, batchItems, err)
+		}
+
+		// Push every parsed item (4 bytes each), intentionally allowed to exceed
+		// QueueSize so Push is exercised on a full ring under the configured
+		// backpressure policy; overflow must drop or evict without panicking. The
+		// upper bound keeps runtime bounded for large inputs. declared is derived
+		// from a signed 16-bit value so zero, negative, and over-long reported
+		// lengths all reach the engine's truncation guard.
+		const stride = 4
+		for i := 0; i+stride <= len(data) && i < 64*stride; i += stride {
+			rawDeclared := int16(uint16(data[i]) | uint16(data[i+1])<<8)
+			declared := int(rawDeclared) % (maxBatch*2 + 16) // May be negative or exceed avail.
+			written := int(data[i+2]) % (itemSize + 1)       // Range [0, itemSize].
+			b.Push(fuzzMarshalItem{
+				declared: int32(declared),
+				written:  int32(written),
+				fill:     data[i+3],
+			})
+		}
+
+		// Drain synchronously. Each cycle consumes at least one item (flushing it or
+		// dropping it as truncated), so QueueSize+8 cycles fully drains the ring.
+		prevOffset := 0
+		var keyframeN uint32
+		for k := 0; k < 24; k++ {
+			b.drainAndFlush(context.Background(), &prevOffset, &keyframeN)
+		}
+
+		// Every emitted frame must decode and pass its CRC check.
+		for fi, frame := range sink.frames {
+			h, body, derr := codec.Decode(frame)
+			if derr != nil {
+				t.Fatalf("emitted frame %d (len=%d) failed to decode: %v", fi, len(frame), derr)
+			}
+			if h.Count == 0 {
+				t.Fatalf("emitted frame %d decoded with zero item count", fi)
+			}
+			if len(body) < int(h.Count) {
+				t.Fatalf("emitted frame %d body %d shorter than count %d", fi, len(body), h.Count)
 			}
 		}
 	})
