@@ -63,13 +63,21 @@ func newRingbuf[T Serializable](size uint64) *ringbuf[T] {
 	return r
 }
 
+// maxEvictRetries caps the number of consecutive eviction attempts in push.
+// If the head slot is claimed-but-not-published by a stalled producer,
+// evictOldest is a no-op and the DropOldest loop would spin indefinitely.
+// After this many attempts the loop degrades to DropNewest (returns false)
+// so Push always returns promptly and the caller's DroppedCount is incremented.
+const maxEvictRetries = 128
+
 // push attempts to enqueue item. Returns false only when policy is [DropNewest]
-// and the buffer is full; with [DropOldest] it always retries after eviction.
+// and the buffer is full, or when [DropOldest] exhausts its eviction retry cap.
 //
 // The fast path (diff == 0) is ordered first in the if-chain so the static
 // branch predictor, which treats forward jumps as not-taken, favors the
 // common case. The full/overtaken cases are cold and become forward jumps.
 func (r *ringbuf[T]) push(item T, policy BackpressurePolicy) bool {
+	var evictAttempts int
 	for {
 		pos := r.tail.Load()
 		idx := pos & r.mask
@@ -97,6 +105,10 @@ func (r *ringbuf[T]) push(item T, policy BackpressurePolicy) bool {
 			// DropOldest: evict the oldest item on a separate, non-inlined
 			// path so its node weight is not charged against push's inline
 			// budget, preserving the compiler's ability to inline push itself.
+			// Bound the spin so a stalled producer cannot cause livelock.
+			if evictAttempts++; evictAttempts > maxEvictRetries {
+				return false
+			}
 			r.evictOldest()
 		}
 		// diff > 0: another producer already advanced tail past pos.

@@ -5,6 +5,26 @@ import (
 	"unsafe"
 )
 
+// testXORPanic asserts that XORBytes panics for the given inputs.
+// Uses stdlib recover so testify is not required.
+func testXORPanic(t *testing.T, dst, a, b []byte) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Errorf("XORBytes did not panic with mismatched lengths (dst=%d a=%d b=%d)", len(dst), len(a), len(b))
+		}
+	}()
+	XORBytes(dst, a, b)
+}
+
+// TestXORBytesPanicGuard verifies that XORBytes panics when dst or b is shorter
+// than a. The fuzz corpus always passes equal-length slices, so without this
+// explicit test a refactor that removes the guard would pass undetected.
+func TestXORBytesPanicGuard(t *testing.T) {
+	testXORPanic(t, []byte("abcde"), []byte("abc"), []byte("ab"))   // len(b) < len(a)
+	testXORPanic(t, []byte("ab"), []byte("abcde"), []byte("abcde")) // len(dst) < len(a)
+}
+
 // FuzzXORBytes stress-tests the vectorized XOR engine against random byte slice
 // lengths, exercising both the 8-byte word loop and the len%8 tail-byte fallback.
 // It asserts that the output is correct and that XORing twice recovers the original.

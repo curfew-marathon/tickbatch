@@ -84,15 +84,17 @@ func main() {
 			log.Printf("tickbatch: flush error: %v", err)
 		default:
 			seq++
-			b.Push(RiskEvent{
-				InstrumentID: seq % 8,
-				SequenceNum:  seq,
-				Price:        100.0 + float64(seq%100)*0.01,
-				Delta:        0.45,
-				Gamma:        0.02,
-				Timestamp:    time.Now().UnixNano(),
-				Flags:        0x01,
-			})
+			// Zero-initialize before setting fields so inter-field padding bytes
+			// are guaranteed to be zero and cannot leak stale process memory on wire.
+			var ev RiskEvent
+			ev.InstrumentID = seq % 8
+			ev.SequenceNum = seq
+			ev.Price = 100.0 + float64(seq%100)*0.01
+			ev.Delta = 0.45
+			ev.Gamma = 0.02
+			ev.Timestamp = time.Now().UnixNano()
+			ev.Flags = 0x01
+			b.Push(ev)
 		}
 	}
 }
