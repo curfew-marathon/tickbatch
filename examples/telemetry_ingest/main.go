@@ -10,7 +10,7 @@ import (
 	"time"
 	"unsafe"
 
-	tickbatch "github.com/curfew-marathon/tickbatch"
+	"github.com/curfew-marathon/tickbatch"
 )
 
 // riskEventSize is the encoded byte size of one RiskEvent.

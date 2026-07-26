@@ -103,24 +103,37 @@ type Config struct {
 //
 // The zero value is not usable; construct via [New].
 type Batcher[T Serializable] struct {
+	// Immutable after construction.
 	byteBuffer     []byte
 	previousState  []byte
 	deltaBuffer    []byte
 	compressBuffer []byte
 	ring           *ringbuf[T]
 	cfg            Config
-	sequenceID     atomic.Uint32
 	started        atomic.Bool
-	dropped        atomic.Uint64
+
+	// Producer-written on every overflow (any Push() goroutine). Isolated on its
+	// own cache line to prevent false sharing with the consumer group below.
+	dropped atomic.Uint64
+	_       [56]byte // 8 (dropped) + 56 = 64 bytes: one full cache line
+
+	// Consumer-written exclusively by the background flush goroutine. Grouped
+	// together — no cross-thread writes within this group.
+	sequenceID     atomic.Uint32
+	_              [4]byte // align next uint64
+	truncated      atomic.Uint64
+	flushedBatches atomic.Uint64
+	flushedItems   atomic.Uint64
 }
 
 // New allocates and returns a ready-to-use Batcher.
 // It panics if cfg.QueueSize is zero or not a power of two, if
-// cfg.MaxBatchSize is smaller than headerSize, or if cfg.Backpressure
+// cfg.MaxBatchSize is smaller than the fixed batch header, if cfg.MaxItemSize
+// is not positive, if cfg.TickRate is not positive, or if cfg.Backpressure
 // is not a known [BackpressurePolicy] constant.
 func New[T Serializable](cfg Config) *Batcher[T] {
 	if cfg.MaxBatchSize < headerSize {
-		panic("tickbatch: Config.MaxBatchSize must be at least headerSize bytes")
+		panic(fmt.Sprintf("tickbatch: Config.MaxBatchSize must be at least %d bytes (the fixed batch header)", headerSize))
 	}
 	if cfg.Backpressure != DropNewest && cfg.Backpressure != DropOldest {
 		panic("tickbatch: Config.Backpressure is not a valid BackpressurePolicy")
@@ -129,7 +142,10 @@ func New[T Serializable](cfg Config) *Batcher[T] {
 		panic("tickbatch: Config.MaxItemSize must be positive")
 	}
 	if cfg.MaxBatchSize < headerSize+cfg.MaxItemSize {
-		panic("tickbatch: Config.MaxBatchSize must be >= headerSize + MaxItemSize")
+		panic(fmt.Sprintf("tickbatch: Config.MaxBatchSize must be >= headerSize + MaxItemSize (%d + %d = %d minimum)", headerSize, cfg.MaxItemSize, headerSize+cfg.MaxItemSize))
+	}
+	if cfg.TickRate <= 0 {
+		panic("tickbatch: Config.TickRate must be positive")
 	}
 	if cfg.DeltaEncoding && cfg.Sink != nil {
 		if _, ok := cfg.Sink.(ReliableSink); !ok {
@@ -180,20 +196,35 @@ func (b *Batcher[T]) EvictedCount() uint64 {
 	return b.ring.evicted.Load()
 }
 
+// TruncatedCount returns the number of items that were dequeued by the drain loop
+// but discarded because their Marshal method returned zero bytes. A non-zero value
+// indicates a bug in the T.Marshal implementation.
+func (b *Batcher[T]) TruncatedCount() uint64 {
+	return b.truncated.Load()
+}
+
+// FlushedBatches returns the total number of batches delivered to [Sink].
+func (b *Batcher[T]) FlushedBatches() uint64 {
+	return b.flushedBatches.Load()
+}
+
+// FlushedItems returns the total number of items serialized and delivered across
+// all flushes. Dividing by [FlushedBatches] gives the average batch fill rate.
+func (b *Batcher[T]) FlushedItems() uint64 {
+	return b.flushedItems.Load()
+}
+
 // Start launches the tick engine in a background goroutine and returns a channel
 // that is closed once the goroutine has fully exited.
 //
 // The engine runs until ctx is canceled, allowing callers to wait for a clean
-// shutdown by receiving from the returned channel. It panics if Config.TickRate
-// is not positive, or if Start has already been called on this Batcher.
+// shutdown by receiving from the returned channel. It panics if Start has already
+// been called on this Batcher.
 //
 // Callers must halt all producers before canceling the context. Any [Batcher.Push]
 // call that races with the final drain after cancellation may be silently lost;
 // quiescing producers is the caller's responsibility.
 func (b *Batcher[T]) Start(ctx context.Context) <-chan struct{} {
-	if b.cfg.TickRate <= 0 {
-		panic("tickbatch: Config.TickRate must be positive")
-	}
 	if !b.started.CompareAndSwap(false, true) {
 		panic("tickbatch: Start called more than once")
 	}
@@ -222,6 +253,7 @@ func (b *Batcher[T]) drainAndFlush(prevOffset *int) {
 			break
 		}
 		if written == 0 {
+			b.truncated.Add(1)
 			break
 		}
 		offset += written
@@ -230,6 +262,8 @@ func (b *Batcher[T]) drainAndFlush(prevOffset *int) {
 	if n == 0 || b.cfg.Sink == nil {
 		return
 	}
+	b.flushedBatches.Add(1)
+	b.flushedItems.Add(uint64(n))
 
 	seq := b.sequenceID.Add(1)
 	b.byteBuffer[0] = byte(seq)
