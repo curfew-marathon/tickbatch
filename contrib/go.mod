@@ -3,7 +3,7 @@ module github.com/curfew-marathon/tickbatch/contrib
 go 1.25.0
 
 require (
-	github.com/curfew-marathon/tickbatch v0.0.0
+	github.com/curfew-marathon/tickbatch v1.0.0
 	github.com/prometheus/client_golang v1.24.1
 )
 
@@ -18,5 +18,3 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
-
-replace github.com/curfew-marathon/tickbatch => ../
