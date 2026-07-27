@@ -270,6 +270,8 @@ Header bytes [0:8] are explicit little-endian on all platforms. Body bytes [8:N]
 
 When `Config.DeltaEncoding` is true, the payload delivered to `Sink.Flush` is the XOR of the current raw frame against the previous raw frame. Receivers must maintain a copy of the prior raw frame and XOR it with each received frame to reconstruct the original batch. If a frame is lost in transit (e.g. over UDP), all subsequent frames produce corrupt output - only enable delta encoding over reliable transports.
 
+**Reference decoder.** You do not need to parse this layout by hand. The stdlib-only [`codec`](https://pkg.go.dev/github.com/curfew-marathon/tickbatch/codec) sub-package decodes frames for you: `codec.Decode` parses the header and verifies the CRC, and `codec.DeltaReconstructor` reverses the XOR delta against the previous frame - honoring keyframes - for delta-encoded streams. It has no dependency on the tickbatch core, so a receiver can vendor just the decoder.
+
 ### Delivery Semantics
 
 tickbatch provides **at-most-once delivery** and **producer isolation** - not end-to-end reliability.
@@ -351,6 +353,15 @@ QueueDepth() / QueueCap() > 0.8
 # Guard the zero value: LastFlushAt() is zero until the first successful flush.
 !b.LastFlushAt().IsZero() && time.Since(b.LastFlushAt()) > 5*time.Second
 ```
+
+#### Metrics Adapters
+
+The counters above are plain atomic reads, so you can wire them into any metrics system yourself. For the common backends, tickbatch ships pre-built adapters in a **separate module** with its own `go.mod`, [`contrib`](https://pkg.go.dev/github.com/curfew-marathon/tickbatch/contrib) - keeping third-party dependencies out of the zero-dependency core:
+
+- **`tickbatchprom`** - a Prometheus `Collector` that exports a `Batcher`'s `Stats()` snapshot. Register it with `prometheus.MustRegister(tickbatchprom.NewCollector("myapp", b.Stats))`.
+- **`tickbatchexpvar`** - publishes the same snapshot to `/debug/vars` via `tickbatchexpvar.Publish("tickbatch", b.Stats)`.
+
+Both take a `func() tickbatch.Stats`, so the `b.Stats` method value can be passed directly.
 
 ---
 
