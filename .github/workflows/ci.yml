@@ -37,6 +37,13 @@ jobs:
   lint:
     name: Lint & Security
     runs-on: ubuntu-latest
+    # golangci-lint and its config-verify install target @latest, which has
+    # drifted ahead of go.mod's `go 1.25` (golangci-lint/v2 now requires
+    # go >= 1.26). GOTOOLCHAIN=auto lets `go install` fetch the newer
+    # toolchain on demand for these tool installs without raising the
+    # module's own declared minimum Go version.
+    env:
+      GOTOOLCHAIN: auto
     steps:
       - uses: actions/checkout@v7
       - name: Set up Go
@@ -57,6 +64,12 @@ jobs:
   benchmark:
     name: Performance Enforcer
     runs-on: ubuntu-latest
+    # benchstat installs @latest, which now requires go >= 1.26 (ahead of
+    # go.mod's `go 1.25`). GOTOOLCHAIN=auto (already used below for the
+    # main-branch comparison checkout) lets this install fetch the newer
+    # toolchain on demand instead of failing outright.
+    env:
+      GOTOOLCHAIN: auto
     steps:
       - uses: actions/checkout@v7
         with:
@@ -85,7 +98,6 @@ jobs:
         shell: bash
         env:
           BASE_REF: ${{ github.base_ref }}
-          GOTOOLCHAIN: auto
         run: |
           git checkout "$BASE_REF"
           go test -bench=. -benchmem -count=5 ./... | tee main.out
